@@ -165,7 +165,9 @@ def scan_image(
     try:
         results = [*read_json(output)["results"], *read_json(image_path)["results"]]
     except (OSError, ValueError, KeyError, TypeError) as err:
-        return "failed", f"osv-scanner scan image wrote no valid results: {err}"
+        # neutral wording: the BOM output of this target is read here too, so a
+        # broken one would fail with the image scan blamed
+        return "failed", f"no valid results to merge: {err}"
     dump_json(output, {"results": results})
     return "ok", None
 
@@ -190,25 +192,22 @@ def run_all(args: argparse.Namespace, run: Runner, now: datetime) -> None:
                 continue
             tid = target["id"]
             ref = target["ref"] if target["kind"] == "image" else None
+            # osv-scanner takes the format of a BOM from its file name
+            bom_path = Path(work) / f"{tid}.cdx.json"
             if (trivy := trivy_status(trivy_dir, tid)) != "ok":
                 status, reason = "not_applicable", f"trivy target {trivy}"
             elif target.get("image_scan_disabled"):
                 # the direct image scan is off for the repository; the BOM query runs
-                status, bom_reason = scan_target(
-                    trivy_dir / f"{tid}.json",
-                    # osv-scanner takes the format of a BOM from its file name
-                    Path(work) / f"{tid}.cdx.json",
-                    out_dir / f"{tid}.json",
-                    run,
+                # (ref=None), a failed one keeps its own reason, only a good one
+                # states the exclusion
+                status, reason = scan_target(
+                    trivy_dir / f"{tid}.json", bom_path, out_dir / f"{tid}.json", run
                 )
-                # a failed BOM query keeps its own reason; only a good one states
-                # the exclusion
-                reason = bom_reason or IMAGE_SCAN_DISABLED_REASON
+                reason = reason or IMAGE_SCAN_DISABLED_REASON
             else:
                 status, reason = scan_target(
                     trivy_dir / f"{tid}.json",
-                    # osv-scanner takes the format of a BOM from its file name
-                    Path(work) / f"{tid}.cdx.json",
+                    bom_path,
                     out_dir / f"{tid}.json",
                     run,
                     ref,

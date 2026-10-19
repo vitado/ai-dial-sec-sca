@@ -398,8 +398,13 @@ def test_an_image_target_is_scanned_by_bom_and_by_image(tmp_path: Path) -> None:
     assert image[image.index("--format") + 1] == "json"
     # the image scan writes to its own file, not over the BOM output
     assert image[image.index("--output-file") + 1] != str(ws.result())
-    # the results of both are concatenated into the one output
+    # the results of both are concatenated into the one output, the BOM query's
+    # first (the file is the audit artifact read in order)
     merged = json.loads(ws.result().read_text(encoding="utf-8"))
+    bom_names = [p["package"]["name"] for p in commands.scanner_output["results"][0]["packages"]]
+    image_names = [p["package"]["name"] for p in commands.image_output["results"][0]["packages"]]
+    assert [p["package"]["name"] for p in merged["results"][0]["packages"]] == bom_names
+    assert [p["package"]["name"] for p in merged["results"][1]["packages"]] == image_names
     assert len(merged["results"]) == 2
     sources = {r["source"]["type"] for r in merged["results"]}
     assert sources == {"sbom"}
@@ -432,7 +437,20 @@ def test_an_image_scan_output_of_an_unexpected_shape_fails_the_target(
     ws = image_workspace(tmp_path)
     ws.run(FakeCommands(image_output={"unexpected": True}))
     assert ws.status()["status"] == "failed"
-    assert "wrote no valid results" in ws.status()["reason"]
+    assert "no valid results to merge" in ws.status()["reason"]
+
+
+def test_a_bom_query_that_fails_before_the_image_scan_runs_no_docker(
+    tmp_path: Path,
+) -> None:
+    # a failed convert or BOM query returns before scan image, so no image was
+    # pulled and docker image rm must not be called
+    ws = image_workspace(tmp_path)
+    commands = FakeCommands(convert_exit=2)
+    ws.run(commands)
+    assert ws.status()["status"] == "failed"
+    assert commands.scans("image") == []
+    assert commands.docker() == []
 
 
 def test_the_image_scan_flag_skips_only_the_image_scan(tmp_path: Path) -> None:

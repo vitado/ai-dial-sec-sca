@@ -40,13 +40,19 @@ def target_label(target: Mapping[str, Any], repo: str) -> str:
 def vulnerability_keys(
     findings: Sequence[Finding], cls: str, tid: str | None = None
 ) -> dict[tuple[str, str, str], str]:
-    """(id, package, version) -> severity of the unique vulnerabilities of a class,
-    of one target or of all; Trivy's severity wins over OSV's.
+    """(id, package) -> severity of the unique vulnerabilities of a class, of one
+    target or of all; Trivy's severity wins over OSV's. OS rows drop the version: the
+    scanners write the same package's version differently (dpkg epochs and
+    revisions), and a unique vulnerability is one per package, not per version
+    spelling.
     """
     keys: dict[tuple[str, str, str], str] = {}
     for f in sorted(findings, key=lambda f: f["scanner"] != "trivy"):
         if f["class"] == cls and tid in (None, f["target"]):
-            keys.setdefault((f["id"], norm(f["pkg"]), f["version"]), f["severity"])
+            if cls == "os":
+                keys.setdefault((f["id"], norm(f["pkg"])), f["severity"])
+            else:
+                keys.setdefault((f["id"], norm(f["pkg"]), f["version"]), f["severity"])
     return keys
 
 
@@ -62,15 +68,22 @@ def severity_counts(keys: Mapping[Any, str]) -> str:
 def package_rows(
     findings: Sequence[Finding], source_ids: set[str]
 ) -> list[dict[str, Any]]:
-    """One row per (class, normalized package name, version) with its unique
-    vulnerabilities merged over targets and scanners (Trivy's severity wins), worst
-    severity first.
+    """One row per (class, normalized package name) - the version dropped for OS
+    packages, which the scanners spell differently (dpkg epochs and revisions) - with
+    its unique vulnerabilities merged over targets and scanners (Trivy's severity
+    wins), worst severity first.
     """
-    groups: dict[tuple[str, str, str], list[Finding]] = {}
+    groups: dict[tuple[str, ...], list[Finding]] = {}
     for f in findings:
-        groups.setdefault((f["class"], norm(f["pkg"]), f["version"]), []).append(f)
+        key = (f["class"], norm(f["pkg"])) if f["class"] == "os" else (
+            f["class"],
+            norm(f["pkg"]),
+            f["version"],
+        )
+        groups.setdefault(key, []).append(f)
     rows = []
-    for (cls, _, version), fs in groups.items():
+    for key, fs in groups.items():
+        cls, version = key[0], key[-1]
         # the name as written in a source target (lockfile), else the first seen
         pkg = next((f for f in fs if f["target"] in source_ids), fs[0])["pkg"]
         # findings of one vulnerability under different ids merge by shared aliases
@@ -165,8 +178,11 @@ def package_table(
     head += ["Targets", "Scanner"]
     lines = ["| " + " | ".join(head) + " |", "|" + "|".join(["---"] * len(head)) + "|"]
     for r in rows:
+        # an OS package has no version in its cell: the scanners spell the same
+        # version differently (dpkg epochs and revisions), there is no one to prefer
+        name = r["pkg"] if r["class"] == "os" else f"{r['pkg']}@{r['version']}"
         cells = [
-            cell(f"{r['pkg']}@{r['version']}"),
+            cell(name),
             vulnerabilities_cell(r),
             cell(r["fixed"]),
         ]
@@ -188,11 +204,16 @@ def totals(rows: Sequence[Mapping[str, Any]]) -> str:
 
 def scan_status(trivy: Mapping[str, Any], osv: Mapping[str, Any] | None) -> str:
     text = trivy["status"] + (f" ({trivy['reason']})" if trivy["reason"] else "")
-    if trivy["status"] == "ok" and osv and osv["status"] != "ok":
-        detail = (
-            f"failed: {osv['reason']}" if osv["status"] == "failed" else osv["status"]
-        )
-        text += f" · OSV {detail}"
+    if trivy["status"] == "ok" and osv:
+        if osv["status"] != "ok":
+            detail = (
+                f"failed: {osv['reason']}" if osv["status"] == "failed" else osv["status"]
+            )
+            text += f" · OSV {detail}"
+        # an ok with a reason states an exclusion (the image scan disabled for the
+        # repository); it must not read as a plain ok
+        elif osv["reason"]:
+            text += f" · OSV ok ({osv['reason']})"
     return text
 
 

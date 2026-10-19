@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
-"""Check the language packages found by Trivy against OSV with osv-scanner.
+"""Check the packages found by Trivy against OSV with osv-scanner.
 
 Used by the SCA scheduled scan. Every pending OSV target is the twin of a scanned
 Trivy target (same id). The native Trivy JSON of the target is converted to a
-CycloneDX BOM (``trivy convert``); OS packages (Trivy has its own feeds for them) and
-components without a package URL or a version (a local workspace package, which OSV
-cannot be asked about) are removed; ``osv-scanner scan source -L <id>.cdx.json
---all-packages`` matches the rest with OSV (online, api.osv.dev).
+CycloneDX BOM (``trivy convert``); OS packages (which OSV cannot be asked about
+correctly through a BOM: no source package name) and components without a package URL
+or a version (a local workspace package, which OSV cannot be asked about either) are
+removed; ``osv-scanner scan source -L <id>.cdx.json --all-packages`` matches the rest
+with OSV (online, api.osv.dev).
+
+An image target also gets the direct ``osv-scanner scan image <ref> --all-packages``:
+it reads the image's own package database (os-release, apk ``o:`` / dpkg ``Source:``)
+and so can query OSV about the OS packages correctly. The BOM query runs either way,
+so a package either detector sees keeps its OSV check; the two outputs are both
+``{"results": [...]}`` and their ``results`` are concatenated into one ``osv/<id>.json``.
+The image scan is skipped when the target carries ``image_scan_disabled`` (an image too
+large for the runner disk): the target stays ``ok`` with a reason, so the exclusion is
+stated, not silent. After each image scan ``docker image rm`` removes the pulled image
+(their store must not fill the runner disk).
 
 Reads targets.json and ``trivy/<id>.status.json`` of the parts directory. Writes, per
 OSV target, ``osv/<id>.status.json`` (``{status, reason, queried_at,
 scanner_version}``) and, if ``ok``, ``osv/<id>.json``, the osv-scanner output as is.
 
 osv-scanner exits 0 (nothing found) or 1 (vulnerabilities found); any other exit code
-is a failure, so a broken run never looks like a clean one. A target whose Trivy
-target was not scanned is ``not_applicable``. The merge fails an output that is not a
-valid result. The script exits 0: the workflow decides about failing the run.
+is a failure, so a broken run never looks like a clean one - a failed image scan fails
+its target even though the BOM query succeeded. A target whose Trivy target was not
+scanned is ``not_applicable``. The merge fails an output that is not a valid result.
+The script exits 0: the workflow decides about failing the run.
 """
 
 from __future__ import annotations
@@ -36,6 +48,11 @@ OS_PURL_TYPES = frozenset({"deb", "apk", "rpm"})
 # osv-scanner: 0 nothing found, 1 vulnerabilities found
 EXIT_CODES_OK = (0, 1)
 REASON_LIMIT = 400
+# An image target whose direct image scan is switched off for the repository
+IMAGE_SCAN_DISABLED_REASON = (
+    "osv image scan disabled for this repository (image too large for the runner "
+    "disk): OS packages of the image are not checked by OSV"
+)
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
@@ -86,10 +103,17 @@ def filter_bom(bom: dict[str, Any]) -> dict[str, Any]:
 
 
 def scan_target(
-    native: Path, bom_path: Path, output: Path, run: Runner
+    native: Path,
+    bom_path: Path,
+    output: Path,
+    run: Runner,
+    ref: str | None = None,
 ) -> tuple[str, str | None]:
     """Convert, filter and scan one target: ``(status, reason)``; the osv-scanner
     output is written to ``output``.
+
+    An image target (``ref`` given) also scans the image itself, which queries OSV
+    about its OS packages; its ``results`` are appended to the BOM output's.
     """
     convert = ["trivy", "convert", "--format", "cyclonedx", "--output", str(bom_path)]
     converted = run([*convert, str(native)])
@@ -110,6 +134,39 @@ def scan_target(
             return "failed", f"osv-scanner failed (exit {code}): {tail(scanned.stderr)}"
     else:
         dump_json(output, {"results": []})
+    if ref is None:
+        return "ok", None
+    try:
+        # a separate file: the image scan must not overwrite the BOM output
+        return scan_image(ref, output, bom_path.with_suffix(".image.json"), run)
+    finally:
+        # cleanup, not a result: docker keeps every pulled image in its store
+        run(["docker", "image", "rm", ref])
+
+
+def scan_image(
+    ref: str, output: Path, image_path: Path, run: Runner
+) -> tuple[str, str | None]:
+    """``osv-scanner scan image`` of one image reference: its ``results`` are
+    concatenated onto the BOM query's ``results`` in ``output`` (the other top-level
+    keys of the scan image output are dropped; the merge reads only ``results``).
+    A failed scan is a failed target even though the BOM query succeeded: a target
+    not scanned to the end never looks clean.
+    """
+    scan = ["scan", "image", ref, "--all-packages", "--format", "json"]
+    scan += ["--output-file", str(image_path)]
+    scanned = run(["osv-scanner", *scan])
+    if scanned.returncode not in EXIT_CODES_OK:
+        code = scanned.returncode
+        return (
+            "failed",
+            f"osv-scanner scan image failed (exit {code}): {tail(scanned.stderr)}",
+        )
+    try:
+        results = [*read_json(output)["results"], *read_json(image_path)["results"]]
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        return "failed", f"osv-scanner scan image wrote no valid results: {err}"
+    dump_json(output, {"results": results})
     return "ok", None
 
 
@@ -132,8 +189,21 @@ def run_all(args: argparse.Namespace, run: Runner, now: datetime) -> None:
             if target["scanner"] != "osv" or target["status"] != "pending":
                 continue
             tid = target["id"]
+            ref = target["ref"] if target["kind"] == "image" else None
             if (trivy := trivy_status(trivy_dir, tid)) != "ok":
                 status, reason = "not_applicable", f"trivy target {trivy}"
+            elif target.get("image_scan_disabled"):
+                # the direct image scan is off for the repository; the BOM query runs
+                status, bom_reason = scan_target(
+                    trivy_dir / f"{tid}.json",
+                    # osv-scanner takes the format of a BOM from its file name
+                    Path(work) / f"{tid}.cdx.json",
+                    out_dir / f"{tid}.json",
+                    run,
+                )
+                # a failed BOM query keeps its own reason; only a good one states
+                # the exclusion
+                reason = bom_reason or IMAGE_SCAN_DISABLED_REASON
             else:
                 status, reason = scan_target(
                     trivy_dir / f"{tid}.json",
@@ -141,6 +211,7 @@ def run_all(args: argparse.Namespace, run: Runner, now: datetime) -> None:
                     Path(work) / f"{tid}.cdx.json",
                     out_dir / f"{tid}.json",
                     run,
+                    ref,
                 )
             dump_json(
                 out_dir / f"{tid}.status.json",

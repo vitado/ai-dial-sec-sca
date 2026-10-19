@@ -46,7 +46,11 @@ def osv_native():
         ],
         "groups": [{"ids": ["GHSA-x"], "aliases": ["CVE-2026-1"]}],
     }
-    return {"results": [{"packages": [entry]}]}
+    return {
+        "results": [
+            {"source": {"path": "x.cdx.json", "type": "sbom"}, "packages": [entry]}
+        ]
+    }
 
 
 def target(tid, scanner, kind="fs", status="pending", reason=None):
@@ -254,3 +258,39 @@ def test_a_package_of_two_ecosystems_counts_twice():
         {"package": {**entry["package"], "ecosystem": e}} for e in ("npm", "PyPI")
     ]
     assert count_packages("osv", {"results": [{"packages": packages}]}) == 2
+
+
+def test_an_ok_osv_target_states_its_reason(tmp_path):
+    run = Run(
+        tmp_path,
+        [target("app-development", "trivy", "image"), target("app-development", "osv", "image")],
+    )
+    run.part("trivy", "app-development", trivy_native(), {"status": "ok"})
+    run.part(
+        "osv",
+        "app-development",
+        osv_native(),
+        {
+            "status": "ok",
+            "reason": (
+                "osv image scan disabled for this repository (image too large for "
+                "the runner disk): OS packages of the image are not checked by OSV"
+            ),
+        },
+    )
+    failed, report = run.merge()
+    assert failed == 0
+    row = entry(report, "app-development", "osv")
+    assert row["status"] == "ok"
+    assert "osv image scan disabled" in row["reason"]
+
+
+def test_a_flag_bearing_image_target_reaches_the_report(tmp_path):
+    flagged = {**target("app-development", "trivy", "image"), "image_scan_disabled": True}
+    run = Run(tmp_path, [flagged, target("app-development", "osv", "image")])
+    run.part("trivy", "app-development", trivy_native(), {"status": "ok"})
+    run.part("osv", "app-development", osv_native(), {"status": "ok"})
+    failed, report = run.merge()
+    assert failed == 0
+    assert {t["status"] for t in report["targets"]} == {"ok"}
+    assert "image_scan_disabled" in report["targets"][0]

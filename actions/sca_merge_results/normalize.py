@@ -233,62 +233,72 @@ def normalize_osv(
 ) -> None:
     """One finding per osv-scanner group of a package. Severity is the rating the
     database gives (GHSA), else the bucket of the group's CVSS score.
+
+    The results of the BOM query and of a direct image scan are one list, so the
+    class is derived per result entry: a result of an OS source holds OS packages.
+    An OS package is reported under its installed name (``os_package_name``, what
+    Trivy reports as ``Name`` too, so the rows line up) while OSV keys the record -
+    and the ``fixed`` filter below - by the source name.
     """
-    for entry in (p for r in native["results"] for p in r["packages"]):
-        vulns = {v["id"]: v for v in entry.get("vulnerabilities", [])}
-        name, version = entry["package"]["name"], entry["package"]["version"]
-        own = inventory.get((norm(name), version), {**no_graph(), "locations": []})
-        for group in entry.get("groups", []):
-            members = [vulns[i] for i in group["ids"] if i in vulns]
-            ids = list(dict.fromkeys(group["ids"] + group.get("aliases", [])))
-            vid = pick_id(ids)
-            rating = next(
-                (
-                    v["database_specific"]["severity"]
-                    for v in members
-                    if (v.get("database_specific") or {}).get("severity")
-                ),
-                None,
-            )
-            rating = {"MODERATE": "MEDIUM"}.get(rating, rating)
-            # fixes of every branch (ECOSYSTEM/SEMVER ranges; GIT ranges hold commits)
-            fixed = ", ".join(
-                dict.fromkeys(
-                    event["fixed"]
-                    for v in members
-                    for affected in v.get("affected", [])
-                    if affected.get("package", {}).get("name") == name
-                    for rng in affected.get("ranges", [])
-                    if rng.get("type") in ("ECOSYSTEM", "SEMVER")
-                    for event in rng.get("events", [])
-                    if "fixed" in event
+    for result in native["results"]:
+        cls = "os" if result["source"]["type"] == "os" else "lang"
+        for entry in result["packages"]:
+            vulns = {v["id"]: v for v in entry.get("vulnerabilities", [])}
+            package = entry["package"]
+            name, version = package["name"], package["version"]
+            pkg = package.get("os_package_name") or name
+            own = inventory.get((norm(pkg), version), {**no_graph(), "locations": []})
+            for group in entry.get("groups", []):
+                members = [vulns[i] for i in group["ids"] if i in vulns]
+                ids = list(dict.fromkeys(group["ids"] + group.get("aliases", [])))
+                vid = pick_id(ids)
+                rating = next(
+                    (
+                        v["database_specific"]["severity"]
+                        for v in members
+                        if (v.get("database_specific") or {}).get("severity")
+                    ),
+                    None,
                 )
-            )
-            first = members[0] if members else {}
-            add_finding(
-                findings,
-                {
-                    "target": tid,
-                    "scanner": "osv",
-                    "id": vid,
-                    "aliases": [i for i in ids if i != vid],
-                    "pkg": name,
-                    "version": version,
-                    "ecosystem": entry["package"]["ecosystem"],
-                    "class": "lang",
-                    "locations": list(own["locations"]),
-                    "severity": rating
-                    if rating in SEVERITIES
-                    else severity_of_score(group.get("max_severity")),
-                    "fixed_version": fixed,
-                    "dev": own["dev"],
-                    "relationship": own["relationship"],
-                    "chain": own["chain"],
-                    "title": first.get("summary")
-                    or next(iter((first.get("details") or "").splitlines()), ""),
-                    "url": OSV_URL + group["ids"][0],
-                },
-            )
+                rating = {"MODERATE": "MEDIUM"}.get(rating, rating)
+                # fixes of every branch (ECOSYSTEM/SEMVER ranges; GIT ranges hold commits)
+                fixed = ", ".join(
+                    dict.fromkeys(
+                        event["fixed"]
+                        for v in members
+                        for affected in v.get("affected", [])
+                        if affected.get("package", {}).get("name") == name
+                        for rng in affected.get("ranges", [])
+                        if rng.get("type") in ("ECOSYSTEM", "SEMVER")
+                        for event in rng.get("events", [])
+                        if "fixed" in event
+                    )
+                )
+                first = members[0] if members else {}
+                add_finding(
+                    findings,
+                    {
+                        "target": tid,
+                        "scanner": "osv",
+                        "id": vid,
+                        "aliases": [i for i in ids if i != vid],
+                        "pkg": pkg,
+                        "version": version,
+                        "ecosystem": package["ecosystem"],
+                        "class": cls,
+                        "locations": list(own["locations"]),
+                        "severity": rating
+                        if rating in SEVERITIES
+                        else severity_of_score(group.get("max_severity")),
+                        "fixed_version": fixed,
+                        "dev": own["dev"],
+                        "relationship": own["relationship"],
+                        "chain": own["chain"],
+                        "title": first.get("summary")
+                        or next(iter((first.get("details") or "").splitlines()), ""),
+                        "url": OSV_URL + group["ids"][0],
+                    },
+                )
 
 
 def borrow_source_chains(

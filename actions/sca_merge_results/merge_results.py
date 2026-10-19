@@ -87,7 +87,9 @@ def load_target_result(
         return failed(f"{scanner} result is not valid JSON: {e}")
     if not isinstance(native, dict):
         return failed(f"{scanner} result is not a JSON object")
-    return {"status": "ok", "reason": None}, native, status
+    # a reason on an ok target states an exclusion (an OSV image scan disabled for
+    # the repository); today it is None
+    return {"status": "ok", "reason": status.get("reason")}, native, status
 
 
 def count_packages(scanner: str, native: Mapping[str, Any]) -> int:
@@ -137,6 +139,8 @@ def run_merge(
                 "commit_sha": target["commit_sha"],
                 "image": target["image"],
                 "image_digest": None,
+                # the exclusion is stated in the report, not silent
+                **({"image_scan_disabled": True} if target.get("image_scan_disabled") else {}),
                 **state,
                 "packages_scanned": None,
             }

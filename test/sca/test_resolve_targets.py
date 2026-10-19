@@ -934,3 +934,78 @@ def test_run_adds_osv_twins(tmp_path: Path) -> None:
     ]
 
 
+# --- the image scan toggle ------------------------------------------------------
+
+
+def osv_twins(targets_doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        t["id"]: t for t in targets_doc["targets"] if t["scanner"] == "osv"
+    }
+
+
+def test_image_scan_disabled_marks_only_image_osv_twins() -> None:
+    t = FakeRunner()
+    github_routes(t, release="1.1.14")
+    t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
+    inputs = rt.Inputs(
+        repository=REPOSITORY,
+        caller_repository=CALLER,
+        images=["example/app"],
+        image_scan=False,
+    )
+    twins = osv_twins(
+        rt.resolve_targets(inputs, rt.GitHubClient(t), rt.RegistryClient(t, "ghcr.io"), ENV)
+    )
+    assert twins["source-development"].get("image_scan_disabled") is None
+    assert twins["source-1.1.14"].get("image_scan_disabled") is None
+    assert twins["app-development"]["image_scan_disabled"] is True
+    assert twins["app-1.1.14"]["image_scan_disabled"] is True
+
+
+@pytest.mark.parametrize("image_scan", [None, True])
+def test_image_scan_enabled_leaves_no_flag_on_any_twin(image_scan: bool | None) -> None:
+    t = FakeRunner()
+    github_routes(t, release="1.1.14")
+    t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
+    inputs = rt.Inputs(
+        repository=REPOSITORY,
+        caller_repository=CALLER,
+        images=["example/app"],
+        **({"image_scan": image_scan} if image_scan is not None else {}),
+    )
+    targets_doc = rt.resolve_targets(
+        inputs, rt.GitHubClient(t), rt.RegistryClient(t, "ghcr.io"), ENV
+    )
+    assert not any("image_scan_disabled" in t for t in targets_doc["targets"])
+
+
+def test_image_scan_disabled_does_not_change_the_target_statuses() -> None:
+    t = FakeRunner()
+    github_routes(t, release="1.1.14")
+    t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
+    inputs = rt.Inputs(
+        repository=REPOSITORY,
+        caller_repository=CALLER,
+        images=["example/app"],
+        image_scan=False,
+    )
+    targets_doc = rt.resolve_targets(
+        inputs, rt.GitHubClient(t), rt.RegistryClient(t, "ghcr.io"), ENV
+    )
+    assert {t["status"] for t in targets_doc["targets"]} == {"pending"}
+
+
+def test_image_scan_input_parsing(tmp_path: Path) -> None:
+    for raw, expected in [
+        ("true", True),
+        ("", True),
+        ("True", True),
+        ("false", False),
+        ("False", False),
+        ("0", False),
+        ("no", False),
+    ]:
+        inputs = rt.Inputs.from_environ(run_env(tmp_path, IMAGE_SCAN=raw))
+        assert inputs.image_scan is expected, raw
+
+

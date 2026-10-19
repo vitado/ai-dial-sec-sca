@@ -186,11 +186,17 @@ def make_target(
     }
 
 
-def make_osv_target(trivy_target: Mapping[str, Any]) -> dict[str, Any]:
+def make_osv_target(
+    trivy_target: Mapping[str, Any], image_scan_disabled: bool = False
+) -> dict[str, Any]:
     """The OSV twin of a Trivy target: OSV queries the packages Trivy found, so the
-    twin has something to do only if the Trivy target is scanned.
+    twin has something to do only if the Trivy target is scanned. An image twin can
+    carry ``image_scan_disabled``: the direct OSV image scan is switched off for the
+    repository (an image too large for the runner disk), the BOM query stays.
     """
     twin = {**trivy_target, "scanner": "osv"}
+    if image_scan_disabled and trivy_target["kind"] == "image":
+        twin["image_scan_disabled"] = True
     if trivy_target["status"] != "pending":
         twin["status"] = "not_applicable"
         twin["reason"] = f"trivy target {trivy_target['status']}"
@@ -303,6 +309,7 @@ class Inputs:
     caller_repository: str
     registry: str = GHCR_HOST
     images: Sequence[str] = ()
+    image_scan: bool = True
     token: str | None = None
 
     @classmethod
@@ -318,6 +325,8 @@ class Inputs:
             caller_repository=environ["GITHUB_REPOSITORY"],
             registry=environ.get("REGISTRY") or GHCR_HOST,
             images=tuple(parse_images(environ.get("IMAGES", ""))),
+            image_scan=(environ.get("IMAGE_SCAN") or "true").strip().lower()
+            not in ("false", "0", "no"),
             token=environ.get("GITHUB_TOKEN") or None,
         )
 
@@ -348,7 +357,8 @@ def resolve_targets(
     for image in inputs.images:
         targets.extend(resolve_image_targets(registry, image, release))
     # After all trivy targets, in the same order
-    targets.extend([make_osv_target(t) for t in targets])
+    disabled = not inputs.image_scan
+    targets.extend([make_osv_target(t, image_scan_disabled=disabled) for t in targets])
     check_unique_ids(targets)
 
     run_id = environ["GITHUB_RUN_ID"]

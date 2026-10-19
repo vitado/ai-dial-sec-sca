@@ -192,7 +192,12 @@ def test_an_image_package_the_source_does_not_have_stays_without_a_chain():
 
 
 def osv_native(
-    group_ids=("GHSA-aaaa",), aliases=("CVE-2026-9",), severity=None, score="7.5"
+    group_ids=("GHSA-aaaa",),
+    aliases=("CVE-2026-9",),
+    severity=None,
+    score="7.5",
+    source_type="sbom",
+    **package_extra,
 ):
     record = {
         "id": group_ids[0],
@@ -212,11 +217,15 @@ def osv_native(
     }
     group = {"ids": list(group_ids), "aliases": list(aliases), "max_severity": score}
     package_entry = {
-        "package": {"name": "a", "version": "1.0", "ecosystem": "npm"},
+        "package": {"name": "a", "version": "1.0", "ecosystem": "npm", **package_extra},
         "vulnerabilities": [record],
         "groups": [group],
     }
-    return {"results": [{"packages": [package_entry]}]}
+    return {
+        "results": [
+            {"source": {"path": "x.cdx.json", "type": source_type}, "packages": [package_entry]}
+        ]
+    }
 
 
 def test_osv_finding_takes_chain_dev_and_locations_from_the_trivy_inventory():
@@ -287,3 +296,102 @@ def test_osv_fixed_version_skips_git_ranges():
 
 def test_osv_fixed_version_lists_every_branch_once():
     assert osv_fixed(("ECOSYSTEM", "1.5"), ("SEMVER", "2.1", "1.5")) == "1.5, 2.1"
+
+
+# --- the image scan rows --------------------------------------------------------
+
+
+def osv_image_native():
+    """One osv result of an OS source (Alpine apk DB) and one of an artifact source,
+    as ``osv-scanner scan image`` writes them (runs/38)."""
+    os_entry = {
+        "package": {
+            "name": "expat",
+            "os_package_name": "libexpat",
+            "version": "2.8.5-r0",
+            "ecosystem": "Alpine:v3.24",
+        },
+        "vulnerabilities": [
+            {
+                "id": "ALPINE-CVE-2026-1",
+                "summary": "A flaw in expat",
+                "affected": [
+                    {
+                        "package": {"name": "expat"},
+                        "ranges": [
+                            {
+                                "type": "ECOSYSTEM",
+                                "events": [{"introduced": "0"}, {"fixed": "2.8.6-r0"}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "groups": [
+            {
+                "ids": ["ALPINE-CVE-2026-1"],
+                "aliases": ["CVE-2026-1"],
+                "max_severity": "5.9",
+            }
+        ],
+    }
+    artifact_entry = {
+        "package": {"name": "requests", "version": "2.0.0", "ecosystem": "PyPI"},
+        "vulnerabilities": [
+            {
+                "id": "GHSA-aaaa",
+                "summary": "A flaw in requests",
+                "affected": [
+                    {
+                        "package": {"name": "requests"},
+                        "ranges": [
+                            {
+                                "type": "ECOSYSTEM",
+                                "events": [{"introduced": "0"}, {"fixed": "2.1.0"}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "groups": [{"ids": ["GHSA-aaaa"], "aliases": [], "max_severity": "7.5"}],
+    }
+    return {
+        "results": [
+            {
+                "source": {"path": "/lib/apk/db/installed", "type": "os"},
+                "packages": [os_entry],
+            },
+            {
+                "source": {"path": "/usr/lib/python/metadata", "type": "artifact"},
+                "packages": [artifact_entry],
+            },
+        ]
+    }
+
+
+def test_osv_image_class_and_pkg_come_from_the_result_and_os_package_name():
+    findings: dict = {}
+    normalize_osv("app-development", osv_image_native(), findings, {})
+    os_row = next(r for r in findings.values() if r["id"] == "CVE-2026-1")
+    assert (os_row["class"], os_row["pkg"]) == ("os", "libexpat")
+    assert os_row["ecosystem"] == "Alpine:v3.24"  # as osv-scanner gives it
+    lang_row = next(r for r in findings.values() if r["id"] == "GHSA-aaaa")
+    assert (lang_row["class"], lang_row["pkg"]) == ("lang", "requests")
+
+
+def test_an_os_row_without_a_trivy_twin_is_empty_but_true():
+    findings: dict = {}
+    normalize_osv("app-development", osv_image_native(), findings, {})
+    os_row = next(r for r in findings.values() if r["id"] == "CVE-2026-1")
+    assert (os_row["chain"], os_row["dev"], os_row["relationship"]) == ([], False, None)
+    assert os_row["locations"] == []
+
+
+def test_osv_image_fixed_version_is_filtered_on_the_source_name():
+    findings: dict = {}
+    normalize_osv("app-development", osv_image_native(), findings, {})
+    os_row = next(r for r in findings.values() if r["id"] == "CVE-2026-1")
+    # the record is keyed by the source name `expat`, not the installed `libexpat`
+    assert os_row["fixed_version"] == "2.8.6-r0"

@@ -68,7 +68,7 @@ PACKAGES = (("npm", "lodash", "4.17.0"), ("PyPI", "requests", "2.0.0"))
 
 
 class FakeCommands:
-    """Stands in for ``trivy`` and ``osv-scanner``; records every command.
+    """Stands in for ``trivy``, ``osv-scanner`` and ``docker``; records every command.
 
     ``scanner_exit``/``scanner_output``: what osv-scanner does (an output of
     False writes nothing; a string is written as is).
@@ -81,6 +81,9 @@ class FakeCommands:
         scanner_exit: int = 1,
         scanner_output: Any = None,
         scanner_stderr: str = "",
+        image_exit: int | None = None,
+        image_output: Any = None,
+        docker_exit: int = 0,
     ) -> None:
         self.bom = bom
         self.convert_exit = convert_exit
@@ -91,12 +94,21 @@ class FakeCommands:
             else scanner_output
         )
         self.scanner_stderr = scanner_stderr
+        self.image_exit = scanner_exit if image_exit is None else image_exit
+        self.image_output = (
+            osv_output(*PACKAGES, vulnerable=True)
+            if image_output is None
+            else image_output
+        )
+        self.docker_exit = docker_exit
         self.calls: list[list[str]] = []
         self.scanned_boms: list[dict[str, Any]] = []
 
     def __call__(self, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         command = list(command)
         self.calls.append(command)
+        if command[0] == "docker":
+            return subprocess.CompletedProcess(command, self.docker_exit, "", "")
         if command[1] == "--version":
             out = "osv-scanner version: 2.6.0\nosv-scalibr version: 0.4.8\n"
             return subprocess.CompletedProcess(command, 0, out, "")
@@ -109,9 +121,15 @@ class FakeCommands:
                 json.dumps(self.bom), encoding="utf-8"
             )
             return subprocess.CompletedProcess(command, 0, "", "")
+        output = Path(command[command.index("--output-file") + 1])
+        if command[1:3] == ["scan", "image"]:
+            if self.image_output is not False:
+                output.write_text(json.dumps(self.image_output), encoding="utf-8")
+            return subprocess.CompletedProcess(
+                command, self.image_exit, "", self.scanner_stderr
+            )
         bom_path = Path(command[command.index("-L") + 1])
         self.scanned_boms.append(json.loads(bom_path.read_text(encoding="utf-8")))
-        output = Path(command[command.index("--output-file") + 1])
         if self.scanner_output is not False:
             text = (
                 self.scanner_output
@@ -123,20 +141,36 @@ class FakeCommands:
             command, self.scanner_exit, "", self.scanner_stderr
         )
 
-    def scans(self) -> list[list[str]]:
-        return [c for c in self.calls if c[1:3] == ["scan", "source"]]
+    def scans(self, kind: str = "source") -> list[list[str]]:
+        return [c for c in self.calls if c[1:3] == ["scan", kind]]
+
+    def docker(self) -> list[list[str]]:
+        return [c for c in self.calls if c[0] == "docker"]
 
 
 class Workspace:
     """targets.json (one Trivy target and its OSV twin) and the Trivy parts."""
 
-    def __init__(self, tmp_path: Path, trivy_status: str | None = "ok") -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        trivy_status: str | None = "ok",
+        kind: str = "fs",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         self.targets_file = tmp_path / "targets.json"
         self.parts_dir = tmp_path / "parts"
         self.output_dir = tmp_path / "out"
         trivy = self.parts_dir / "trivy"
         trivy.mkdir(parents=True)
-        target = {"id": "source-development", "status": "pending"}
+        tid = "app-development" if kind == "image" else "source-development"
+        target = {
+            "id": tid,
+            "kind": kind,
+            "status": "pending",
+            "ref": "ghcr.io/example/app:development" if kind == "image" else None,
+            **(extra or {}),
+        }
         self.targets_file.write_text(
             json.dumps(
                 {
@@ -149,14 +183,14 @@ class Workspace:
             encoding="utf-8",
         )
         if trivy_status is not None:
-            (trivy / "source-development.status.json").write_text(
-                json.dumps({"id": "source-development", "status": trivy_status}),
-                encoding="utf-8",
+            (trivy / f"{tid}.status.json").write_text(
+                json.dumps({"id": tid, "status": trivy_status}), encoding="utf-8"
             )
         if trivy_status == "ok":
-            (trivy / "source-development.json").write_text(
+            (trivy / f"{tid}.json").write_text(
                 json.dumps({"Results": []}), encoding="utf-8"
             )
+        self.tid = tid
 
     def run(self, commands: FakeCommands) -> None:
         args = argparse.Namespace(
@@ -171,11 +205,11 @@ class Workspace:
         return self.output_dir / "osv"
 
     def status(self) -> dict[str, Any]:
-        path = self.osv_dir / "source-development.status.json"
+        path = self.osv_dir / f"{self.tid}.status.json"
         return json.loads(path.read_text(encoding="utf-8"))
 
     def result(self) -> Path:
-        return self.osv_dir / "source-development.json"
+        return self.osv_dir / f"{self.tid}.json"
 
 
 # --- the BOM ------------------------------------------------------------------
@@ -344,3 +378,74 @@ def test_only_pending_osv_targets_are_processed(tmp_path: Path) -> None:
     ws.run(commands)
     assert commands.scans() == []
     assert not (ws.osv_dir / "source-development.status.json").exists()
+
+
+# --- an image target ----------------------------------------------------------
+
+
+def image_workspace(tmp_path: Path, **extra: Any) -> Workspace:
+    return Workspace(tmp_path, kind="image", extra=extra)
+
+
+def test_an_image_target_is_scanned_by_bom_and_by_image(tmp_path: Path) -> None:
+    ws = image_workspace(tmp_path)
+    commands = FakeCommands()
+    ws.run(commands)
+    bom, image = commands.scans("source")[0], commands.scans("image")[0]
+    assert image[:3] == ["osv-scanner", "scan", "image"]
+    assert image[3] == "ghcr.io/example/app:development"
+    assert "--all-packages" in image
+    assert image[image.index("--format") + 1] == "json"
+    # the image scan writes to its own file, not over the BOM output
+    assert image[image.index("--output-file") + 1] != str(ws.result())
+    # the results of both are concatenated into the one output
+    merged = json.loads(ws.result().read_text(encoding="utf-8"))
+    assert len(merged["results"]) == 2
+    sources = {r["source"]["type"] for r in merged["results"]}
+    assert sources == {"sbom"}
+    assert commands.docker() == [["docker", "image", "rm", image[3]]]
+
+
+def test_a_docker_image_rm_failure_does_not_fail_the_target(tmp_path: Path) -> None:
+    ws = image_workspace(tmp_path)
+    ws.run(FakeCommands(docker_exit=1))
+    assert ws.status()["status"] == "ok"
+
+
+@pytest.mark.parametrize("exit_code", [2, 127])
+def test_a_failed_image_scan_fails_the_target_even_with_a_good_bom(
+    tmp_path: Path, exit_code: int
+) -> None:
+    ws = image_workspace(tmp_path)
+    commands = FakeCommands(image_exit=exit_code, scanner_stderr="pull failed")
+    ws.run(commands)
+    assert ws.status()["status"] == "failed"
+    assert ws.status()["reason"] == (
+        f"osv-scanner scan image failed (exit {exit_code}): pull failed"
+    )
+    assert commands.docker() == [["docker", "image", "rm", "ghcr.io/example/app:development"]]
+
+
+def test_an_image_scan_output_of_an_unexpected_shape_fails_the_target(
+    tmp_path: Path,
+) -> None:
+    ws = image_workspace(tmp_path)
+    ws.run(FakeCommands(image_output={"unexpected": True}))
+    assert ws.status()["status"] == "failed"
+    assert "wrote no valid results" in ws.status()["reason"]
+
+
+def test_the_image_scan_flag_skips_only_the_image_scan(tmp_path: Path) -> None:
+    ws = image_workspace(tmp_path, image_scan_disabled=True)
+    commands = FakeCommands()
+    ws.run(commands)
+    assert len(commands.scans("source")) == 1
+    assert commands.scans("image") == []
+    assert commands.docker() == []
+    merged = json.loads(ws.result().read_text(encoding="utf-8"))
+    assert len(merged["results"]) == 1
+    assert ws.status()["status"] == "ok"
+    assert ws.status()["reason"] == (
+        "osv image scan disabled for this repository (image too large for the "
+        "runner disk): OS packages of the image are not checked by OSV"
+    )

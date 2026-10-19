@@ -1,5 +1,5 @@
 name: Query OSV for SCA scan packages
-description: Check the language packages found by Trivy in the targets of an SCA scheduled scan against OSV (osv.dev) with osv-scanner; OS packages are not queried
+description: Check the packages found by Trivy in the targets of an SCA scheduled scan against OSV (osv.dev) with osv-scanner; for image targets also a direct OSV image scan, which queries OSV about the OS packages of the image too
 
 inputs:
   targets-file:
@@ -31,9 +31,9 @@ runs:
     - name: Install osv-scanner
       shell: bash
       env:
-        OSV_SCANNER_VERSION: v2.6.0
-        SHA256_AMD64: ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
-        SHA256_ARM64: 2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4
+        OSV_SCANNER_VERSION: v2.7.0
+        SHA256_AMD64: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+        SHA256_ARM64: 4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
       run: |
         case "$(uname -m)" in
           x86_64) arch=amd64; sha256="$SHA256_AMD64" ;;

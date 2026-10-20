@@ -36,6 +36,8 @@ TOOL_TIMEOUT_SECONDS = 120.0
 MAX_ATTEMPTS = 4
 BACKOFF_BASE_SECONDS = 1.0
 RELEASES_PER_PAGE = 100
+# a cap on the pages read (1000 releases), so a runaway listing cannot loop on
+MAX_RELEASE_PAGES = 10
 
 _NAME_PART = r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
 IMAGE_NAME = re.compile(rf"{_NAME_PART}(?:/{_NAME_PART})*", re.ASCII)
@@ -116,19 +118,25 @@ class GitHubClient:
         return self._get(f"repos/{repo}/commits/{quoted}")["sha"]
 
     def releases(self, repo: str) -> list[dict[str, Any]]:
-        """The published releases, one page (newest first); a repository without
-        releases has none, which is not an error."""
-        releases = (
-            self._get(
-                f"repos/{repo}/releases?per_page={RELEASES_PER_PAGE}", missing_ok=True
+        """The published releases (newest first), all pages up to the cap; a
+        repository without releases has none, which is not an error. Only a listing
+        cut by the cap warns."""
+        releases: list[dict[str, Any]] = []
+        for page in range(1, MAX_RELEASE_PAGES + 1):
+            batch = (
+                self._get(
+                    f"repos/{repo}/releases?per_page={RELEASES_PER_PAGE}&page={page}",
+                    missing_ok=True,
+                )
+                or []
             )
-            or []
+            releases += batch
+            if len(batch) < RELEASES_PER_PAGE:
+                return releases
+        print(
+            f"::warning title=Release list truncated::the release set is built "
+            f"from the newest {len(releases)} releases"
         )
-        if len(releases) == RELEASES_PER_PAGE:
-            print(
-                f"::warning title=Release list truncated::the release set is built "
-                f"from the newest {RELEASES_PER_PAGE} releases"
-            )
         return releases
 
     def tag_commit_sha(self, repo: str, tag: str) -> str:

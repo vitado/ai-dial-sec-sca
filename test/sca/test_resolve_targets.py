@@ -81,11 +81,15 @@ def github_routes(
     runner.add(f"repos/{REPOSITORY}", ok({"default_branch": branch}))
     quoted = urllib.parse.quote(branch, safe="")
     runner.add(f"repos/{REPOSITORY}/commits/{quoted}", ok({"sha": "a" * 40}))
-    listing = f"repos/{REPOSITORY}/releases?per_page=100"
+    listing = f"repos/{REPOSITORY}/releases?per_page=100&page="
     if releases_status is not None:
-        runner.add(listing, http_error(releases_status))
+        runner.add(f"{listing}1", http_error(releases_status))
     else:
-        runner.add(listing, ok(releases or []))
+        pages = [(releases or [])[i : i + 100] for i in range(0, len(releases or []), 100)]
+        if not pages or len(pages[-1]) == 100:
+            pages.append([])  # the page after a full last one is asked for too
+        for number, page in enumerate(pages, 1):
+            runner.add(f"{listing}{number}", ok(page))
         for release in releases or []:
             if not release.get("draft"):
                 tag_routes(runner, release["tag_name"], "c" * 40)
@@ -975,23 +979,57 @@ def test_release_set_drafts_are_ignored() -> None:
     assert list(targets) == ["source-development", "source-0.22.0"]
 
 
-def test_release_set_full_page_warns_and_still_builds(
+def many_stables(count: int) -> list[dict[str, Any]]:
+    """Newest first: 0.<count-1>.0 down to 0.0.0, one release per line."""
+    return [
+        stable(f"0.{count - 1 - i}.0", f"2025-01-01T00:00:{i % 60:02d}Z")
+        for i in range(count)
+    ]
+
+
+def test_release_set_reads_every_page_of_the_listing(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     t = FakeRunner()
-    newest_first = [
-        stable(f"0.{99 - i}.0", f"2025-{i + 1:02d}-01T00:00:00Z") for i in range(100)
-    ]
-    github_routes(t, newest_first)
-    targets_doc = run_resolve_targets(t, [])
-    assert list(by_id(targets_doc)) == [
+    # the only candidate is on the third page
+    releases = [*many_stables(220), candidate("1.0.0-rc.1", "2024-01-01T00:00:00Z")]
+    github_routes(t, releases)
+    targets = list(by_id(run_resolve_targets(t, [])))
+    assert targets == [
         "source-development",
-        "source-0.99.0",
-        "source-0.98.0",
+        "source-0.219.0",
+        "source-0.218.0",
+        "source-1.0.0-rc.1",
     ]
+    assert [u for u in t.urls if "releases?" in u] == [
+        f"repos/{REPOSITORY}/releases?per_page=100&page={n}" for n in (1, 2, 3)
+    ]
+    assert "::warning" not in capsys.readouterr().out
+
+
+def test_release_set_a_full_last_page_asks_for_the_next_and_does_not_warn(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    t = FakeRunner()
+    github_routes(t, many_stables(100))
+    run_resolve_targets(t, [])
+    assert t.urls.count(f"repos/{REPOSITORY}/releases?per_page=100&page=2") == 1
+    assert "::warning" not in capsys.readouterr().out
+
+
+def test_release_set_page_cap_warns_and_still_builds(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(rt, "MAX_RELEASE_PAGES", 2)
+    t = FakeRunner()
+    github_routes(t, many_stables(250))
+    targets = list(by_id(run_resolve_targets(t, [])))
+    assert targets == ["source-development", "source-0.249.0", "source-0.248.0"]
+    # the third page is never asked for (it is not routed)
+    assert not any(u.endswith("page=3") for u in t.urls)
     assert (
         "::warning title=Release list truncated::the release set is built from the "
-        "newest 100 releases" in capsys.readouterr().out
+        "newest 200 releases" in capsys.readouterr().out
     )
 
 

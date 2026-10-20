@@ -12,8 +12,11 @@ inputs:
     description: Image names without registry, one per line (e.g. epam/ai-dial-chat). Empty means source scan only
     default: ""
   osv-image-scan:
-    description: Whether the OSV targets of image kinds run the direct OSV image scan (osv-scanner scan image); turn off for an image too large for the runner disk. The OSV BOM query always runs
+    description: Whether the OSV targets of image kinds run the direct OSV image scan (osv-scanner scan image); turn off for an image too large for the runner disk. The OSV BOM query always runs. Pass the repository's own setting; a manual run forces the scan with force-image-scan
     default: "true"
+  force-image-scan:
+    description: Run the direct OSV image scan although osv-image-scan is off for the repository (a manual run); the run is then marked forced_image_scan in targets.json and in the report
+    default: "false"
   release-lines:
     description: How many newest minor release lines are scanned (one latest patch each), plus the newest release candidate if any
     default: "2"
@@ -55,6 +58,7 @@ runs:
         REGISTRY: ${{ inputs.registry }}
         IMAGES: ${{ inputs.images }}
         IMAGE_SCAN: ${{ inputs.osv-image-scan }}
+        FORCE_IMAGE_SCAN: ${{ inputs.force-image-scan }}
         RELEASE_LINES: ${{ inputs.release-lines }}
         SCAN_TAG: ${{ inputs.scan-tag }}
         OUTPUT_DIR: ${{ inputs.output-dir }}

@@ -1612,3 +1612,66 @@ def test_focus_run_target_schema_is_uniform() -> None:
     assert twins["app-0.22.0"]["status"] == "pending"
 
 
+
+
+# --- the forced image scan (a manual run on a repository that has the scan off) --
+
+
+def resolve_with(
+    image_scan: bool, force_image_scan: bool | None = None
+) -> dict[str, Any]:
+    t = FakeRunner()
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
+    t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
+    inputs = rt.Inputs(
+        repository=REPOSITORY,
+        caller_repository=CALLER,
+        images=["example/app"],
+        image_scan=image_scan,
+        **({} if force_image_scan is None else {"force_image_scan": force_image_scan}),
+    )
+    return rt.resolve_targets(
+        inputs, rt.GitHubClient(t), rt.RegistryClient(t, "ghcr.io"), ENV
+    )
+
+
+def test_force_image_scan_runs_the_scan_and_marks_the_run() -> None:
+    targets_doc = resolve_with(image_scan=False, force_image_scan=True)
+    assert targets_doc["forced_image_scan"] is True
+    assert not any("image_scan_disabled" in t for t in targets_doc["targets"])
+
+
+def test_force_image_scan_on_a_repository_with_the_scan_on_marks_nothing() -> None:
+    targets_doc = resolve_with(image_scan=True, force_image_scan=True)
+    assert "forced_image_scan" not in targets_doc
+    assert not any("image_scan_disabled" in t for t in targets_doc["targets"])
+
+
+def test_without_force_the_disabled_scan_stays_disabled_and_unmarked() -> None:
+    targets_doc = resolve_with(image_scan=False)
+    assert "forced_image_scan" not in targets_doc
+    assert any(t.get("image_scan_disabled") for t in targets_doc["targets"])
+
+
+def test_force_image_scan_input_parsing(tmp_path: Path) -> None:
+    for raw, expected in [
+        ("true", True),
+        ("True", True),
+        (" true ", True),
+        ("", False),
+        ("false", False),
+        ("0", False),
+        ("anything", False),
+    ]:
+        inputs = rt.Inputs.from_environ(run_env(tmp_path, FORCE_IMAGE_SCAN=raw))
+        assert inputs.force_image_scan is expected, raw
+    assert rt.Inputs.from_environ(run_env(tmp_path)).force_image_scan is False
+
+
+def test_run_writes_the_forced_image_scan_to_targets_json(tmp_path: Path) -> None:
+    t = FakeRunner()
+    github_routes(t, [])
+    env = run_env(tmp_path / "out", IMAGE_SCAN="false", FORCE_IMAGE_SCAN="true")
+    rt.run(env, t)
+    doc = json.loads((tmp_path / "out" / "targets.json").read_text(encoding="utf-8"))
+    assert doc["forced_image_scan"] is True

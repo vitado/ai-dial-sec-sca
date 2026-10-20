@@ -454,6 +454,7 @@ class Inputs:
     release_lines: int = 2
     token: str | None = None
     scan_tag: str | None = None
+    force_image_scan: bool = False
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> Inputs:
@@ -481,6 +482,8 @@ class Inputs:
             release_lines=max(release_lines, 1),
             token=environ.get("GITHUB_TOKEN") or None,
             scan_tag=(environ.get("SCAN_TAG") or "").strip() or None,
+            force_image_scan=(environ.get("FORCE_IMAGE_SCAN") or "").strip().lower()
+            == "true",
         )
 
 
@@ -565,8 +568,11 @@ def resolve_targets(
             default_branch,
             commit_sha,
         )
+    # A manual run can force the direct image scan on a repository that has it off;
+    # the document says so, the targets are then not marked disabled.
+    forced = inputs.force_image_scan and not inputs.image_scan
+    disabled = not (inputs.image_scan or inputs.force_image_scan)
     # After all trivy targets, in the same order
-    disabled = not inputs.image_scan
     targets.extend([make_osv_target(t, image_scan_disabled=disabled) for t in targets])
     check_unique_ids(targets)
 
@@ -590,6 +596,7 @@ def resolve_targets(
         "event": event,
         "actor": actor,
         **({"scan_ref": inputs.scan_tag} if inputs.scan_tag else {}),
+        **({"forced_image_scan": True} if forced else {}),
         "targets": targets,
     }
 

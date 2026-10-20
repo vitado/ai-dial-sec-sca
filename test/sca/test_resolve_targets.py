@@ -72,21 +72,41 @@ def tags_url(image: str, host: str = "ghcr.io") -> str:
 
 def github_routes(
     runner: FakeRunner,
-    release: str | None = "1.1.14",
-    release_status: int | None = None,
+    releases: list[dict[str, Any]] | None = None,
+    releases_status: int | None = None,
     branch: str = "development",
 ) -> None:
     runner.add(f"repos/{REPOSITORY}", ok({"default_branch": branch}))
     quoted = urllib.parse.quote(branch, safe="")
     runner.add(f"repos/{REPOSITORY}/commits/{quoted}", ok({"sha": "a" * 40}))
-    latest = f"repos/{REPOSITORY}/releases/latest"
-    if release_status is not None:
-        runner.add(latest, http_error(release_status))
-    elif release is None:
-        runner.add(latest, http_error(404))
+    listing = f"repos/{REPOSITORY}/releases?per_page=100"
+    if releases_status is not None:
+        runner.add(listing, http_error(releases_status))
     else:
-        runner.add(latest, ok({"tag_name": release}))
-        tag_routes(runner, release, "c" * 40)
+        runner.add(listing, ok(releases or []))
+        for release in releases or []:
+            if not release.get("draft"):
+                tag_routes(runner, release["tag_name"], "c" * 40)
+
+
+def stable(tag: str, published_at: str) -> dict[str, Any]:
+    """A GitHub release the repository published as a release."""
+    return {
+        "tag_name": tag,
+        "prerelease": False,
+        "draft": False,
+        "published_at": published_at,
+    }
+
+
+def candidate(tag: str, published_at: str) -> dict[str, Any]:
+    """A GitHub release the repository published as a prerelease."""
+    return {
+        "tag_name": tag,
+        "prerelease": True,
+        "draft": False,
+        "published_at": published_at,
+    }
 
 
 def tag_routes(runner: FakeRunner, tag: str, sha: str) -> None:
@@ -134,7 +154,7 @@ def by_id(targets_doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def test_latest_github_release_is_scanned() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(
         tags_url("example/app"),
         tags_out(["development", "1.1.14", "1.2.0", "1.1.13"]),
@@ -163,7 +183,7 @@ def test_latest_github_release_is_scanned() -> None:
 
 def test_resolve_document_metadata() -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     targets_doc = run_resolve_targets(t, [])
     assert targets_doc["repo"] == REPOSITORY
     assert targets_doc["default_branch"] == "development"
@@ -172,18 +192,27 @@ def test_resolve_document_metadata() -> None:
     assert targets_doc["run_url"] == "https://github.com/example/caller/actions/runs/42"
 
 
-def test_v_prefixed_release_matches_the_unprefixed_image_tag() -> None:
+def test_v_prefixed_candidate_tag_matches_the_unprefixed_image_tag() -> None:
     t = FakeRunner()
-    github_routes(t, release="v1.1.14")
-    t.add(tags_url("example/x"), tags_out(["development", "1.1.14"]))
+    github_routes(
+        t,
+        [
+            stable("1.1.14", "2025-01-02T00:00:00Z"),
+            candidate("v1.1.15-rc.1", "2025-01-03T00:00:00Z"),
+        ],
+    )
+    t.add(
+        tags_url("example/x"),
+        tags_out(["development", "1.1.14", "1.1.15-rc.1"]),
+    )
     targets = by_id(run_resolve_targets(t, ["example/x"]))
-    assert targets["x-1.1.14"]["status"] == "pending"
-    assert targets["x-1.1.14"]["ref"] == "ghcr.io/example/x:1.1.14"
+    assert targets["x-1.1.15-rc.1"]["status"] == "pending"
+    assert targets["x-1.1.15-rc.1"]["ref"] == "ghcr.io/example/x:1.1.15-rc.1"
 
 
 def test_release_tag_missing_for_image_is_not_applicable() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app-bff"), tags_out(["development"]))
     targets = by_id(run_resolve_targets(t, ["example/app-bff"]))
     assert targets["app-bff-development"]["status"] == "pending"
@@ -194,7 +223,7 @@ def test_release_tag_missing_for_image_is_not_applicable() -> None:
 
 def test_missing_development_tag_is_not_applicable() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.0.0")
+    github_routes(t, [stable("1.0.0", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/x"), tags_out(["1.0.0"]))
     targets = by_id(run_resolve_targets(t, ["example/x"]))
     assert targets["x-development"]["status"] == "not_applicable"
@@ -203,7 +232,7 @@ def test_missing_development_tag_is_not_applicable() -> None:
 
 def test_no_github_release_gives_single_not_applicable_release_target() -> None:
     t = FakeRunner()
-    github_routes(t, release=None)
+    github_routes(t, [])
     t.add(tags_url("example/x"), tags_out(["development", "0.9.1", "1.0.0-rc.1"]))
     targets = by_id(run_resolve_targets(t, ["example/x"]))
     assert targets["x-release"]["status"] == "not_applicable"
@@ -215,7 +244,7 @@ def test_no_github_release_gives_single_not_applicable_release_target() -> None:
 
 def test_image_without_tags() -> None:
     t = FakeRunner()
-    github_routes(t, release=None)
+    github_routes(t, [])
     t.add(tags_url("example/x"), tags_out([]))
     targets = by_id(run_resolve_targets(t, ["example/x"]))
     assert targets["x-development"]["status"] == "not_applicable"
@@ -224,7 +253,7 @@ def test_image_without_tags() -> None:
 
 def test_registry_error_fails_only_that_image() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.0.0")
+    github_routes(t, [stable("1.0.0", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/bad"), http_error(404))
     t.add(tags_url("example/good"), tags_out(["development", "1.0.0"]))
     targets = by_id(run_resolve_targets(t, ["example/bad", "example/good"]))
@@ -237,27 +266,24 @@ def test_registry_error_fails_only_that_image() -> None:
 
 def test_registry_tool_failure_fails_image() -> None:
     t = FakeRunner()
-    github_routes(t, release=None)
+    github_routes(t, [])
     t.add(tags_url("example/x"), rt.ToolError("boom"))
     targets = by_id(run_resolve_targets(t, ["example/x"]))
     assert targets["x-development"]["status"] == "failed"
     assert "boom" in targets["x-development"]["reason"]
 
 
-def test_github_release_api_error_fails_release_targets_but_keeps_development() -> None:
+def test_github_release_api_error_fails_the_run() -> None:
     t = FakeRunner()
-    github_routes(t, release_status=403)
-    t.add(tags_url("example/x"), tags_out(["development", "1.0.0"]))
-    targets = by_id(run_resolve_targets(t, ["example/x"]))
-    assert targets["x-development"]["status"] == "pending"
-    assert targets["x-release"]["status"] == "failed"
-    assert "HTTP 403" in targets["x-release"]["reason"]
+    github_routes(t, releases_status=403)
+    with pytest.raises(rt.ResolveError, match="HTTP 403"):
+        run_resolve_targets(t, ["example/x"])
 
 
 @pytest.mark.parametrize("missing", ["repo", "commit"])
 def test_snapshot_failure_is_fatal(missing: str) -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(
         f"repos/{REPOSITORY}" + ("/commits/development" if missing == "commit" else ""),
         http_error(404),
@@ -275,7 +301,7 @@ def test_snapshot_network_failure_is_fatal() -> None:
 
 def test_empty_images_only_sources() -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     targets_doc = run_resolve_targets(t, [])
     assert list(trivy(targets_doc)) == ["source-development", "source-1.1.14"]
     assert not any(url.startswith("ghcr.io/") for url in t.urls)
@@ -283,7 +309,7 @@ def test_empty_images_only_sources() -> None:
 
 def test_id_collision_rejected() -> None:
     t = FakeRunner()
-    github_routes(t, release=None)
+    github_routes(t, [])
     t.add(tags_url("a/x"), tags_out(["development"]))
     t.add(tags_url("b/x"), tags_out(["development"]))
     with pytest.raises(rt.ResolveError, match="collision"):
@@ -292,7 +318,7 @@ def test_id_collision_rejected() -> None:
 
 def test_matrix_has_only_pending_targets_without_status() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/bff"), tags_out(["development"]))
     matrix = rt.build_matrix(run_resolve_targets(t, ["example/bff"]))
     assert [m["id"] for m in matrix] == [
@@ -319,7 +345,9 @@ def test_target_id_is_sanitized() -> None:
 
 def test_source_target_id_sanitized_and_independent_of_sha() -> None:
     t = FakeRunner()
-    github_routes(t, branch="release/1.2")
+    github_routes(
+        t, [stable("1.1.14", "2025-01-01T00:00:00Z")], branch="release/1.2"
+    )
     targets = by_id(run_resolve_targets(t, []))
     assert list(targets) == ["source-release-1.2", "source-1.1.14"]
     assert targets["source-release-1.2"]["git_ref"] == "release/1.2"
@@ -328,7 +356,7 @@ def test_source_target_id_sanitized_and_independent_of_sha() -> None:
 
 def test_fs_target_carries_git_ref_and_commit_sha() -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     targets_doc = run_resolve_targets(t, [])
     assert trivy(targets_doc)["source-development"] == {
         "id": "source-development",
@@ -348,7 +376,7 @@ def test_fs_target_carries_git_ref_and_commit_sha() -> None:
 
 def test_target_schema_is_uniform() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app"), tags_out(["development"]))
     targets_doc = run_resolve_targets(t, ["example/app"])
     kinds = {x["kind"] for x in targets_doc["targets"]}
@@ -374,7 +402,7 @@ def test_target_schema_is_uniform() -> None:
 
 def test_matrix_carries_commit_sha_of_fs_target() -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     fs = rt.build_matrix(run_resolve_targets(t, []))[0]
     assert (fs["id"], fs["commit_sha"]) == ("source-development", "a" * 40)
 
@@ -457,7 +485,7 @@ def test_registry_failure_is_a_resolve_error() -> None:
 
 def test_github_requests_go_through_gh_api() -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     run_resolve_targets(t, [])
     for argv, stdin in t.calls:
         assert argv[:2] == ["gh", "api"]
@@ -567,7 +595,7 @@ def test_run_writes_resolve_json_and_outputs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     tag_routes(t, "1.1.14", "b" * 40)
     t.add(tags_url("example/x"), tags_out(["development"]))
     output_file = tmp_path / "github_output"
@@ -608,7 +636,7 @@ def test_run_uses_token_from_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     tokens: list[str | None] = []
     monkeypatch.setattr(rt, "make_runner", lambda token: tokens.append(token) or t)
     rt.run(run_env(tmp_path, GITHUB_TOKEN="from-env"), None)
@@ -683,12 +711,275 @@ def test_render_table_and_annotations() -> None:
     ]
 
 
+# --- the release set ------------------------------------------------------------
+
+
+def two_lines() -> list[dict[str, Any]]:
+    """Newest first, as GitHub returns them: 0.22.0 shipped before the 0.21.4
+    hotfix."""
+    return [
+        stable("0.21.4", "2025-03-01T00:00:00Z"),
+        stable("0.22.0", "2025-02-01T00:00:00Z"),
+        stable("0.21.3", "2025-01-01T00:00:00Z"),
+        stable("0.20.9", "2024-12-01T00:00:00Z"),
+    ]
+
+
+def test_release_set_takes_the_newest_patch_of_each_line() -> None:
+    t = FakeRunner()
+    github_routes(t, two_lines())
+    targets = by_id(run_resolve_targets(t, []))
+    # the default cap is 2: the 0.20 line falls away, 0.21.4 beats 0.21.3
+    assert list(targets) == ["source-development", "source-0.22.0", "source-0.21.4"]
+
+
+def test_release_set_lines_are_ordered_numerically_not_lexically() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.9.1", "2025-01-01T00:00:00Z"),
+            stable("0.10.0", "2024-12-01T00:00:00Z"),
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == ["source-development", "source-0.10.0", "source-0.9.1"]
+
+
+def test_release_set_hotfix_stays_in_its_own_line() -> None:
+    t = FakeRunner()
+    github_routes(t, two_lines()[:2])
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == ["source-development", "source-0.22.0", "source-0.21.4"]
+
+
+def test_release_set_lines_beyond_the_cap_are_dropped() -> None:
+    t = FakeRunner()
+    github_routes(t, two_lines())
+    targets_doc = rt.resolve_targets(
+        rt.Inputs(
+            repository=REPOSITORY,
+            caller_repository=CALLER,
+            release_lines=3,
+        ),
+        rt.GitHubClient(t),
+        rt.RegistryClient(t, "ghcr.io"),
+        ENV,
+    )
+    assert list(by_id(targets_doc)) == [
+        "source-development",
+        "source-0.22.0",
+        "source-0.21.4",
+        "source-0.20.9",
+    ]
+
+
+def test_release_set_fewer_lines_than_the_cap() -> None:
+    t = FakeRunner()
+    github_routes(t, [stable("1.0.0", "2025-01-01T00:00:00Z")])
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == ["source-development", "source-1.0.0"]
+
+
+def test_release_set_a_tie_keeps_the_first_listed_release() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.21.4", "2025-01-01T00:00:00Z"),
+            stable("0.21.3", "2025-01-01T00:00:00Z"),
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    # GitHub lists the newest first, so the first seen is the newest release
+    assert list(targets) == ["source-development", "source-0.21.4"]
+
+
+def test_release_set_no_releases_gives_the_source_release_placeholder() -> None:
+    t = FakeRunner()
+    github_routes(t, [])
+    t.add(tags_url("example/x"), tags_out(["development", "0.9.1"]))
+    targets = by_id(run_resolve_targets(t, ["example/x"]))
+    placeholder = targets["source-release"]
+    assert placeholder["status"] == "not_applicable"
+    assert placeholder["reason"] == "no GitHub release"
+    assert placeholder["tag"] is None
+    assert placeholder["git_ref"] is None
+    assert targets["x-release"]["reason"] == "no GitHub release"
+
+
+def test_release_set_stale_candidate_is_still_the_candidate() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.22.0", "2025-02-01T00:00:00Z"),
+            stable("0.21.4", "2025-03-01T00:00:00Z"),
+            candidate("0.19.0-rc.2", "2024-11-01T00:00:00Z"),
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == [
+        "source-development",
+        "source-0.22.0",
+        "source-0.21.4",
+        "source-0.19.0-rc.2",
+    ]
+
+
+def test_release_set_newest_candidate_wins() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.22.0", "2025-02-01T00:00:00Z"),
+            candidate("0.23.0-rc.1", "2025-03-01T00:00:00Z"),
+            candidate("0.21.5-rc.1", "2025-02-15T00:00:00Z"),
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    assert "source-0.23.0-rc.1" in targets
+    assert "source-0.21.5-rc.1" not in targets
+
+
+def test_release_set_unflagged_rc_is_an_unmatched_release() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.49.2", "2025-02-01T00:00:00Z"),
+            {**candidate("0.49.0-rc.1", "2025-01-01T00:00:00Z"), "prerelease": False},
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    unmatched = targets["source-0.49.0-rc.1"]
+    assert unmatched["status"] == "not_applicable"
+    assert (
+        unmatched["reason"]
+        == "release tag 0.49.0-rc.1 is not X.Y.Z, so it belongs to no release line"
+    )
+    assert "source-0.49.0-rc.2" not in targets
+
+
+def test_release_set_stable_tag_of_another_shape_is_unmatched() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.22.0", "2025-02-01T00:00:00Z"),
+            stable("release-7", "2025-01-01T00:00:00Z"),
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    unmatched = targets["source-release-7"]
+    assert unmatched["status"] == "not_applicable"
+    assert (
+        unmatched["reason"]
+        == "release tag release-7 is not X.Y.Z, so it belongs to no release line"
+    )
+
+
+def test_release_set_drafts_are_ignored() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.22.0", "2025-02-01T00:00:00Z"),
+            {**stable("0.23.0", "2025-03-01T00:00:00Z"), "draft": True},
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == ["source-development", "source-0.22.0"]
+
+
+def test_release_set_full_page_warns_and_still_builds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    t = FakeRunner()
+    newest_first = [
+        stable(f"0.{99 - i}.0", f"2025-{i + 1:02d}-01T00:00:00Z") for i in range(100)
+    ]
+    github_routes(t, newest_first)
+    targets_doc = run_resolve_targets(t, [])
+    assert list(by_id(targets_doc)) == [
+        "source-development",
+        "source-0.99.0",
+        "source-0.98.0",
+    ]
+    assert (
+        "::warning title=Release list truncated::the release set is built from the "
+        "newest 100 releases" in capsys.readouterr().out
+    )
+
+
+def test_release_set_partial_page_does_not_warn(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    t = FakeRunner()
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
+    run_resolve_targets(t, [])
+    assert "::warning" not in capsys.readouterr().out
+
+
+def test_release_set_one_tag_sha_failure_fails_only_that_tag() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.22.0", "2025-02-01T00:00:00Z"),
+            stable("0.21.4", "2025-03-01T00:00:00Z"),
+        ],
+    )
+    t.add(f"repos/{REPOSITORY}/commits/refs/tags/0.22.0", http_error(404))
+    t.add(tags_url("example/app"), tags_out(["development", "0.21.4", "0.22.0"]))
+    targets = by_id(run_resolve_targets(t, ["example/app"]))
+    assert targets["source-0.22.0"]["status"] == "failed"
+    assert "cannot resolve release tag 0.22.0" in targets["source-0.22.0"]["reason"]
+    assert targets["source-0.21.4"]["status"] == "pending"
+    assert targets["app-0.21.4"]["status"] == "pending"
+    assert targets["app-0.22.0"]["status"] == "pending"
+
+
+def test_release_set_listing_failure_is_fatal_without_placeholders() -> None:
+    t = FakeRunner()
+    github_routes(t, releases_status=502)
+    with pytest.raises(rt.ResolveError, match="HTTP 502"):
+        run_resolve_targets(t, ["example/x"])
+
+
+def test_release_set_image_looks_up_every_release_tag() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.22.0", "2025-02-01T00:00:00Z"),
+            stable("0.21.4", "2025-03-01T00:00:00Z"),
+            candidate("v0.23.0-rc.1", "2025-03-15T00:00:00Z"),
+        ],
+    )
+    t.add(
+        tags_url("example/x"),
+        tags_out(["development", "0.22.0", "0.21.4", "0.23.0-rc.1"]),
+    )
+    targets = by_id(run_resolve_targets(t, ["example/x"]))
+    assert [(t2["id"], t2["tag"]) for t2 in targets.values()] == [
+        ("source-development", None),
+        ("source-0.22.0", "0.22.0"),
+        ("source-0.21.4", "0.21.4"),
+        ("source-v0.23.0-rc.1", "v0.23.0-rc.1"),
+        ("x-development", "development"),
+        ("x-0.22.0", "0.22.0"),
+        ("x-0.21.4", "0.21.4"),
+        ("x-0.23.0-rc.1", "0.23.0-rc.1"),
+    ]
+
+
 # --- release sources ----------------------------------------------------------
 
 
 def test_release_source_target_of_latest_release() -> None:
     t = FakeRunner()
-    github_routes(t, release="0.12.0")
+    github_routes(t, [stable("0.12.0", "2025-01-01T00:00:00Z")])
     tag_routes(t, "0.12.0", "c" * 40)
     t.add(tags_url("example/app"), tags_out(["development", "0.12.0"]))
     targets_doc = run_resolve_targets(t, ["example/app"])
@@ -720,7 +1011,7 @@ def test_release_source_target_of_latest_release() -> None:
 
 def test_release_source_tag_that_cannot_be_resolved_is_a_failed_target() -> None:
     t = FakeRunner()
-    github_routes(t, release="0.12.0")
+    github_routes(t, [stable("0.12.0", "2025-01-01T00:00:00Z")])
     t.add(f"repos/{REPOSITORY}/commits/refs/tags/0.12.0", http_error(404))
     targets_doc = run_resolve_targets(t, [])
     failed = by_id(targets_doc)["source-0.12.0"]
@@ -739,19 +1030,16 @@ def test_release_source_tag_that_cannot_be_resolved_is_a_failed_target() -> None
     )
 
 
-def test_release_source_latest_release_lookup_failure_is_a_failed_target() -> None:
+def test_release_source_listing_failure_is_fatal() -> None:
     t = FakeRunner()
-    github_routes(t, release_status=500)
-    targets = by_id(run_resolve_targets(t, []))
-    assert targets["source-development"]["status"] == "pending"
-    assert targets["source-release"]["status"] == "failed"
-    assert "HTTP 500" in targets["source-release"]["reason"]
-    assert targets["source-release"]["git_ref"] is None
+    github_routes(t, releases_status=500)
+    with pytest.raises(rt.ResolveError, match="HTTP 500"):
+        run_resolve_targets(t, [])
 
 
 def test_release_source_without_images_python_package() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.2.3")
+    github_routes(t, [stable("1.2.3", "2025-01-01T00:00:00Z")])
     tag_routes(t, "1.2.3", "a1" * 20)
     targets_doc = run_resolve_targets(t, [])
     assert list(trivy(targets_doc)) == ["source-development", "source-1.2.3"]
@@ -760,7 +1048,7 @@ def test_release_source_without_images_python_package() -> None:
 
 def test_release_source_without_github_release_is_not_applicable() -> None:
     t = FakeRunner()
-    github_routes(t, release=None)
+    github_routes(t, [])
     targets = by_id(run_resolve_targets(t, []))
     assert targets["source-release"]["status"] == "not_applicable"
     assert targets["source-release"]["reason"] == "no GitHub release"
@@ -769,7 +1057,7 @@ def test_release_source_without_github_release_is_not_applicable() -> None:
 
 def test_release_source_id_sanitized() -> None:
     t = FakeRunner()
-    github_routes(t, release="rel/1.0")
+    github_routes(t, [stable("rel/1.0", "2025-01-01T00:00:00Z")])
     tag_routes(t, "rel/1.0", "b" * 40)
     targets = by_id(run_resolve_targets(t, []))
     assert targets["source-rel-1.0"]["git_ref"] == "rel/1.0"
@@ -780,7 +1068,7 @@ def test_release_source_id_sanitized() -> None:
 
 def test_osv_target_is_the_twin_of_every_trivy_target() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
     targets_doc = run_resolve_targets(t, ["example/app"])
     # Trivy targets as before, then the OSV twins in the same order
@@ -800,7 +1088,7 @@ def test_osv_target_is_the_twin_of_every_trivy_target() -> None:
 
 def test_osv_twins_cover_release_sources_in_resolve_order() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     tag_routes(t, "1.1.14", "c" * 40)
     t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
     targets_doc = run_resolve_targets(
@@ -822,7 +1110,7 @@ def test_osv_twins_cover_release_sources_in_resolve_order() -> None:
     )
     # a release source that failed to resolve has a not_applicable twin
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(f"repos/{REPOSITORY}/commits/refs/tags/1.1.14", http_error(404))
     failed = {
         (x["scanner"], x["id"]): x
@@ -839,7 +1127,7 @@ def test_osv_twin_of_a_trivy_target_that_will_not_be_scanned_is_not_applicable()
     None
 ):
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     # No release tag in the registry: the release target is not_applicable
     t.add(tags_url("example/app"), tags_out(["development"]))
     targets_doc = run_resolve_targets(t, ["example/app"])
@@ -854,7 +1142,7 @@ def test_osv_twin_of_a_trivy_target_that_will_not_be_scanned_is_not_applicable()
 
 def test_osv_twin_of_a_trivy_target_that_failed_to_resolve_is_not_applicable() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app"), http_error(404))
     targets_doc = run_resolve_targets(t, ["example/app"])
     osv = [x for x in targets_doc["targets"] if x["scanner"] == "osv"]
@@ -869,7 +1157,7 @@ def test_osv_twin_of_a_trivy_target_that_failed_to_resolve_is_not_applicable() -
 
 def test_matrix_holds_only_pending_trivy_targets() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
     targets_doc = run_resolve_targets(t, ["example/app"])
     assert [m["id"] for m in rt.build_matrix(targets_doc)] == [
@@ -882,7 +1170,7 @@ def test_matrix_holds_only_pending_trivy_targets() -> None:
 
 def test_osv_twins_are_not_annotated_twice() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app"), tags_out(["development"]))
     targets_doc = run_resolve_targets(t, ["example/app"])
     lines = rt.annotations(targets_doc["targets"])
@@ -899,7 +1187,7 @@ def test_target_identity_is_scanner_and_id() -> None:
 
 def test_render_table_names_the_scanner() -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     table = rt.render_table(run_resolve_targets(t, [])["targets"])
     assert [line.split()[:2] for line in table.splitlines()] == [
         ["ID", "SCANNER"],
@@ -912,7 +1200,7 @@ def test_render_table_names_the_scanner() -> None:
 
 def test_run_adds_osv_twins(tmp_path: Path) -> None:
     t = FakeRunner()
-    github_routes(t)
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     tag_routes(t, "1.1.14", "b" * 40)
     output_file = tmp_path / "github_output"
     env = {**ENV, "GITHUB_OUTPUT": str(output_file), "GITHUB_TOKEN": "tkn"}
@@ -945,7 +1233,7 @@ def osv_twins(targets_doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def test_image_scan_disabled_marks_only_image_osv_twins() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
     inputs = rt.Inputs(
         repository=REPOSITORY,
@@ -965,7 +1253,7 @@ def test_image_scan_disabled_marks_only_image_osv_twins() -> None:
 @pytest.mark.parametrize("image_scan", [None, True])
 def test_image_scan_enabled_leaves_no_flag_on_any_twin(image_scan: bool | None) -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
     inputs = rt.Inputs(
         repository=REPOSITORY,
@@ -981,7 +1269,7 @@ def test_image_scan_enabled_leaves_no_flag_on_any_twin(image_scan: bool | None) 
 
 def test_image_scan_disabled_does_not_change_the_target_statuses() -> None:
     t = FakeRunner()
-    github_routes(t, release="1.1.14")
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
     t.add(tags_url("example/app"), tags_out(["development", "1.1.14"]))
     inputs = rt.Inputs(
         repository=REPOSITORY,
@@ -1007,5 +1295,25 @@ def test_image_scan_input_parsing(tmp_path: Path) -> None:
     ]:
         inputs = rt.Inputs.from_environ(run_env(tmp_path, IMAGE_SCAN=raw))
         assert inputs.image_scan is expected, raw
+
+
+def test_release_lines_input_parsing(tmp_path: Path) -> None:
+    for raw, expected in [("2", 2), ("1", 1), ("", 2), (" 3 ", 3), ("0", 1), ("-4", 1)]:
+        inputs = rt.Inputs.from_environ(run_env(tmp_path, RELEASE_LINES=raw))
+        assert inputs.release_lines == expected, raw
+    with pytest.raises(rt.ResolveError, match="release-lines must be a number"):
+        rt.Inputs.from_environ(run_env(tmp_path, RELEASE_LINES="abc"))
+
+
+def test_release_lines_input_drives_the_set(tmp_path: Path) -> None:
+    t = FakeRunner()
+    github_routes(t, two_lines())
+    inputs = rt.Inputs(
+        repository=REPOSITORY, caller_repository=CALLER, release_lines=1
+    )
+    targets_doc = rt.resolve_targets(
+        inputs, rt.GitHubClient(t), rt.RegistryClient(t, "ghcr.io"), ENV
+    )
+    assert list(by_id(targets_doc)) == ["source-development", "source-0.22.0"]
 
 

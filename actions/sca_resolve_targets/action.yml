@@ -1,5 +1,5 @@
 name: Resolve SCA scan targets
-description: Resolve the default-branch snapshot, the source of the latest release and the container images (development and latest release) that an SCA scheduled scan should cover
+description: Resolve the default-branch snapshot, the sources of the release set (the last N minor release lines and the newest release candidate) and the container images (development and the release tags) that an SCA scheduled scan should cover
 
 inputs:
   repository:
@@ -14,6 +14,9 @@ inputs:
   osv-image-scan:
     description: Whether the OSV targets of image kinds run the direct OSV image scan (osv-scanner scan image); turn off for an image too large for the runner disk. The OSV BOM query always runs
     default: "true"
+  release-lines:
+    description: How many newest minor release lines are scanned (one latest patch each), plus the newest release candidate if any
+    default: "2"
   github-token:
     description: Token for the GitHub API and for authenticating to ghcr.io
     default: ${{ github.token }}
@@ -49,6 +52,7 @@ runs:
         REGISTRY: ${{ inputs.registry }}
         IMAGES: ${{ inputs.images }}
         IMAGE_SCAN: ${{ inputs.osv-image-scan }}
+        RELEASE_LINES: ${{ inputs.release-lines }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         ACTION_PATH: ${{ github.action_path }}

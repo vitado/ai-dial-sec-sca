@@ -193,10 +193,10 @@ def run_merge(
             tools["osv_scanner"] = tools["osv_scanner"] or status.get("scanner_version")
             times = [tools["osv_queried_at"], status.get("queried_at")]
             tools["osv_queried_at"] = max(filter(None, times), default=None)
-    source_ids = [
-        e["id"] for e in entries if e["scanner"] == "trivy" and e["kind"] == "fs"
+    source_targets = [
+        e for e in entries if e["scanner"] == "trivy" and e["kind"] == "fs"
     ]
-    borrow_source_chains(findings, inventories, source_ids)
+    borrow_source_chains(findings, inventories, source_targets)
 
     report = {
         "schema_version": SCHEMA_VERSION,

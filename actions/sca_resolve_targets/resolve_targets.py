@@ -35,6 +35,7 @@ HOST_ALIASES = {"docker.io": DOCKER_HUB_HOST, "index.docker.io": DOCKER_HUB_HOST
 TOOL_TIMEOUT_SECONDS = 120.0
 MAX_ATTEMPTS = 4
 BACKOFF_BASE_SECONDS = 1.0
+RELEASES_PER_PAGE = 100
 
 _NAME_PART = r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
 IMAGE_NAME = re.compile(rf"{_NAME_PART}(?:/{_NAME_PART})*", re.ASCII)
@@ -114,10 +115,21 @@ class GitHubClient:
         quoted = urllib.parse.quote(ref, safe="")
         return self._get(f"repos/{repo}/commits/{quoted}")["sha"]
 
-    def latest_release_tag(self, repo: str) -> str | None:
-        """Tag of the latest GitHub release, or None if the repo has none."""
-        release = self._get(f"repos/{repo}/releases/latest", missing_ok=True)
-        return None if release is None else release["tag_name"]
+    def releases(self, repo: str) -> list[dict[str, Any]]:
+        """The published releases, one page (newest first); a repository without
+        releases has none, which is not an error."""
+        releases = (
+            self._get(
+                f"repos/{repo}/releases?per_page={RELEASES_PER_PAGE}", missing_ok=True
+            )
+            or []
+        )
+        if len(releases) == RELEASES_PER_PAGE:
+            print(
+                f"::warning title=Release list truncated::the release set is built "
+                f"from the newest {RELEASES_PER_PAGE} releases"
+            )
+        return releases
 
     def tag_commit_sha(self, repo: str, tag: str) -> str:
         """Commit a git tag points to (the API peels an annotated tag to its commit)."""
@@ -214,26 +226,70 @@ def parse_images(raw: str) -> list[str]:
     return images
 
 
+VERSION_TAG = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+
 class Release(NamedTuple):
-    """The release of the run: its ``tag``, or the ``error`` of the lookup; both are
-    None if the repository has no GitHub release."""
+    """One GitHub release of the set; ``tag`` None is the placeholder for a
+    repository with no releases at all."""
 
     tag: str | None
-    error: str | None = None
+    published_at: str
 
 
-def resolve_release(github: GitHubClient, repository: str) -> Release:
-    """The release to scan: the latest GitHub release, as it is."""
-    try:
-        return Release(github.latest_release_tag(repository))
-    except ResolveError as err:
-        return Release(None, str(err))
+NO_RELEASE = Release(None, "")
+
+
+class ReleaseSet(NamedTuple):
+    """The scan set of releases: the newest patch of each of the last N minor
+    lines, at most one candidate, and stables whose tag matches no line."""
+
+    stables: list[Release]
+    candidate: Release | None
+    unmatched: list[Release]
+
+
+def release_line(tag: str) -> tuple[int, int] | None:
+    """The ``X.Y`` minor line of an ``X.Y.Z`` tag."""
+    if match := VERSION_TAG.fullmatch(tag):
+        return int(match[1]), int(match[2])
+    return None
+
+
+def resolve_release_set(
+    github: GitHubClient, repository: str, release_lines: int
+) -> ReleaseSet:
+    """The releases to scan, read from the flags the repository sets: a stable is
+    a release with ``prerelease`` and ``draft`` false, drafts are ignored. A line's
+    patch is its stable published last, so a hotfix lifts the patch, not the line."""
+    stables_by_line: dict[tuple[int, int], Release] = {}
+    candidates: list[Release] = []
+    unmatched: list[Release] = []
+    for item in github.releases(repository):
+        if item["draft"]:
+            continue
+        release = Release(item["tag_name"], item["published_at"])
+        if item["prerelease"]:
+            candidates.append(release)
+        elif line := release_line(release.tag):
+            current = stables_by_line.get(line)
+            # first seen wins a tie: GitHub returns the releases newest first
+            if current is None or release.published_at > current.published_at:
+                stables_by_line[line] = release
+        else:
+            unmatched.append(release)
+    newest_lines = sorted(stables_by_line, reverse=True)[:release_lines]
+    candidate = max(candidates, key=lambda r: r.published_at, default=None)
+    return ReleaseSet(
+        [stables_by_line[line] for line in newest_lines], candidate, unmatched
+    )
 
 
 def resolve_image_targets(
-    registry: RegistryClient, image: str, release: Release
+    registry: RegistryClient, image: str, releases: Sequence[Release]
 ) -> list[dict[str, Any]]:
-    """Targets of one image: the ``development`` tag and the tag of the release."""
+    """Targets of one image: the ``development`` tag and every release tag of the
+    set (one tags listing per image, the ``development`` target once)."""
 
     def image_target(tag: str | None, status: str, reason: str | None = None):
         ref = f"{registry.registry}/{image}:{tag}" if tag else None
@@ -244,7 +300,7 @@ def resolve_image_targets(
     except ResolveError as err:
         return [
             image_target("development", "failed", str(err)),
-            image_target(release.tag, "failed", str(err)),
+            *[image_target(r.tag, "failed", str(err)) for r in releases],
         ]
 
     if "development" in tags:
@@ -253,11 +309,10 @@ def resolve_image_targets(
         reason = "tag development not published for this image"
         targets = [image_target("development", "not_applicable", reason)]
 
-    if release.error is not None:
-        targets.append(image_target(None, "failed", release.error))
-    elif release.tag is None:
-        targets.append(image_target(None, "not_applicable", "no GitHub release"))
-    else:
+    for release in releases:
+        if release.tag is None:
+            targets.append(image_target(None, "not_applicable", "no GitHub release"))
+            continue
         # the registry tag may lack the ``v`` of the git tag
         candidates = (release.tag, release.tag.removeprefix("v"))
         if found := next((t for t in candidates if t in tags), None):
@@ -271,7 +326,7 @@ def resolve_image_targets(
 def resolve_release_source_target(
     github: GitHubClient, repository: str, release: Release
 ) -> dict[str, Any]:
-    """The source target of the release: the repository at its git tag, so that
+    """The source target of one release: the repository at its git tag, so that
     repositories without images have a release scan too."""
 
     def source_target(status: str, reason: str | None = None, sha: str | None = None):
@@ -279,8 +334,6 @@ def resolve_release_source_target(
             status, reason, tag=release.tag, git_ref=release.tag, commit_sha=sha
         )
 
-    if release.error is not None:
-        return source_target("failed", release.error)
     if release.tag is None:
         return source_target("not_applicable", "no GitHub release")
     try:
@@ -310,6 +363,7 @@ class Inputs:
     registry: str = GHCR_HOST
     images: Sequence[str] = ()
     image_scan: bool = True
+    release_lines: int = 2
     token: str | None = None
 
     @classmethod
@@ -320,6 +374,14 @@ class Inputs:
         if not REPOSITORY_NAME.fullmatch(repository):
             raise ResolveError(f"repository must be 'owner/name', got {repository!r}")
 
+        raw_lines = (environ.get("RELEASE_LINES") or "2").strip()
+        try:
+            release_lines = int(raw_lines)
+        except ValueError:
+            raise ResolveError(
+                f"release-lines must be a number, got {raw_lines!r}"
+            ) from None
+
         return cls(
             repository=repository,
             caller_repository=environ["GITHUB_REPOSITORY"],
@@ -327,6 +389,7 @@ class Inputs:
             images=tuple(parse_images(environ.get("IMAGES", ""))),
             image_scan=(environ.get("IMAGE_SCAN") or "true").strip().lower()
             not in ("false", "0", "no"),
+            release_lines=max(release_lines, 1),
             token=environ.get("GITHUB_TOKEN") or None,
         )
 
@@ -339,23 +402,48 @@ def resolve_targets(
 ) -> dict[str, Any]:
     """Build the targets.json document. Raises ResolveError without a snapshot.
 
-    One release is scanned (``resolve_release``): its source and, in every image, its
-    tag. Every Trivy target has an OSV twin.
+    The release set of ``release_lines`` minor lines is scanned: the source of each
+    of its tags and, in every image, each of its tags. Every Trivy target has an
+    OSV twin.
 
-    Order: the development source, the release source, then the targets of each
-    image in ``images`` order.
+    Order: the development source, the release sources (newest line first, then
+    the candidate, then the unmatched not-applicable ones), then the targets of
+    each image in ``images`` order.
     """
     repository = inputs.repository
     default_branch = github.default_branch(repository)
     commit_sha = github.commit_sha(repository, default_branch)
 
-    release = resolve_release(github, repository)
+    release_set = resolve_release_set(github, repository, inputs.release_lines)
+    if (
+        not release_set.stables
+        and release_set.candidate is None
+        and not release_set.unmatched
+    ):
+        # the report must show that the repository publishes no releases at all
+        release_set = ReleaseSet([NO_RELEASE], None, [])
+    # an unmatched tag belongs to no release line, so no image is looked up for it
+    image_releases: list[Release] = [*release_set.stables]
+    if release_set.candidate is not None:
+        image_releases.append(release_set.candidate)
     targets: list[dict[str, Any]] = [
-        make_target("pending", git_ref=default_branch, commit_sha=commit_sha),
-        resolve_release_source_target(github, repository, release),
+        make_target("pending", git_ref=default_branch, commit_sha=commit_sha)
     ]
+    for release in release_set.stables:
+        targets.append(resolve_release_source_target(github, repository, release))
+    if release_set.candidate is not None:
+        targets.append(
+            resolve_release_source_target(github, repository, release_set.candidate)
+        )
+    for release in release_set.unmatched:
+        reason = (
+            f"release tag {release.tag} is not X.Y.Z, so it belongs to no release line"
+        )
+        targets.append(
+            make_target("not_applicable", reason, tag=release.tag, git_ref=release.tag)
+        )
     for image in inputs.images:
-        targets.extend(resolve_image_targets(registry, image, release))
+        targets.extend(resolve_image_targets(registry, image, image_releases))
     # After all trivy targets, in the same order
     disabled = not inputs.image_scan
     targets.extend([make_osv_target(t, image_scan_disabled=disabled) for t in targets])

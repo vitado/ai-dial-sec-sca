@@ -177,7 +177,9 @@ def test_an_image_package_borrows_the_chain_of_the_source_not_its_dev_flag():
     rows, _ = trivy(image, tid="app-development")
     findings = dict(enumerate(rows))
     borrow_source_chains(
-        findings, {"source-development": src_inventory}, ["source-development"]
+        findings,
+        {"source-development": src_inventory},
+        [{"id": "source-development", "ref": "development"}],
     )
     assert rows[0]["chain"] == ["top", "jar"] and rows[0]["relationship"] == "indirect"
     assert rows[0]["dev"] is False
@@ -186,9 +188,33 @@ def test_an_image_package_borrows_the_chain_of_the_source_not_its_dev_flag():
 def test_an_image_package_the_source_does_not_have_stays_without_a_chain():
     rows, _ = trivy(result([package("a")], [vuln("a")]), tid="app-development")
     borrow_source_chains(
-        dict(enumerate(rows)), {"source-development": {}}, ["source-development"]
+        dict(enumerate(rows)),
+        {"source-development": {}},
+        [{"id": "source-development", "ref": "development"}],
     )
     assert rows[0]["chain"] == []
+
+
+def test_an_image_package_of_a_release_borrows_the_same_tag_source_first():
+    _, dev_inventory = trivy(
+        result([package("top", depends_on=["jar"], rel="direct"), package("jar", rel="indirect")])
+    )
+    _, rel_inventory = trivy(
+        result([package("rel", depends_on=["jar"], rel="direct"), package("jar", rel="indirect")]),
+        tid="source-0.21.4",
+    )
+    image = result([package("Jar")], [vuln("Jar")], target="app/jar", rtype="jar")
+    rows, _ = trivy(image, tid="app-0.21.4")
+    borrow_source_chains(
+        dict(enumerate(rows)),
+        {"source-development": dev_inventory, "source-0.21.4": rel_inventory},
+        [
+            {"id": "source-development", "ref": "development"},
+            {"id": "source-0.21.4", "ref": "0.21.4"},
+        ],
+    )
+    # the release's own graph wins over development's
+    assert rows[0]["chain"] == ["rel", "jar"]
 
 
 def osv_native(

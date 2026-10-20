@@ -13,7 +13,7 @@ from __future__ import annotations
 import posixpath
 import re
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -302,18 +302,35 @@ def normalize_osv(
 
 
 def borrow_source_chains(
-    findings: Findings, inventories: Mapping[str, Inventory], source_ids: list[str]
+    findings: Findings,
+    inventories: Mapping[str, Inventory],
+    source_targets: Sequence[Mapping[str, Any]],
 ) -> None:
     """A language package of an image without a chain (an image has no graph) takes
-    the chain of the same package and version from a source target of the repo.
-    The dev flag is not borrowed: what is in an image is shipped.
+    the chain of the same package and version from a source target of the repo: the
+    source of its own release tag first, else the first source where the package
+    and version match. The dev flag is not borrowed: what is in an image is shipped.
     """
+    sources = [(t["id"], t.get("ref") or "") for t in source_targets]
+    source_ids = {sid for sid, _ in sources}
+
+    def borrow(row, sid: str) -> bool:
+        known = inventories.get(sid, {}).get((norm(row["pkg"]), row["version"]))
+        if known and known["chain"]:
+            row["chain"] = known["chain"]
+            row["relationship"] = known["relationship"]
+            return True
+        return False
+
     for row in findings.values():
         if row["class"] != "lang" or row["chain"] or row["target"] in source_ids:
             continue
-        for sid in source_ids:
-            known = inventories.get(sid, {}).get((norm(row["pkg"]), row["version"]))
-            if known and known["chain"]:
-                row["chain"] = known["chain"]
-                row["relationship"] = known["relationship"]
+        release_tag = row["target"].rsplit("-", 1)[-1]
+        # the source of the release the image was built from, then the rest
+        for sid, ref in sources:
+            if borrow(row, sid) and ref == release_tag:
                 break
+        else:
+            for sid, _ in sources:
+                if borrow(row, sid):
+                    break

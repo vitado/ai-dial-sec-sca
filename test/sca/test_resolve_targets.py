@@ -16,6 +16,8 @@ ENV = {
     "GITHUB_RUN_ID": "42",
     "GITHUB_SERVER_URL": "https://github.com",
     "GITHUB_REPOSITORY": "example/caller",
+    "GITHUB_EVENT_NAME": "workflow_dispatch",
+    "GITHUB_TRIGGERING_ACTOR": "octocat",
 }
 CALLER = "example/caller"
 
@@ -118,11 +120,13 @@ def run_resolve_targets(
     runner: FakeRunner,
     images: list[str],
     token: str | None = "tkn",
+    scan_tag: str | None = None,
 ) -> dict[str, Any]:
     inputs = rt.Inputs(
         repository=REPOSITORY,
         caller_repository=CALLER,
         images=images,
+        **({"scan_tag": scan_tag} if scan_tag else {}),
     )
     return rt.resolve_targets(
         inputs,
@@ -1315,5 +1319,180 @@ def test_release_lines_input_drives_the_set(tmp_path: Path) -> None:
         inputs, rt.GitHubClient(t), rt.RegistryClient(t, "ghcr.io"), ENV
     )
     assert list(by_id(targets_doc)) == ["source-development", "source-0.22.0"]
+
+
+# --- the scan tag (a focus run on one tag) ---------------------------------------
+
+
+def focus_routes(runner: FakeRunner, tag: str, sha: str = "d" * 40) -> None:
+    github_routes(runner, [])
+    tag_routes(runner, tag, sha)
+
+
+def test_scan_tag_focuses_the_run_on_the_tag() -> None:
+    t = FakeRunner()
+    focus_routes(t, "0.22.0")
+    t.add(tags_url("example/app"), tags_out(["development", "0.22.0", "0.21.4"]))
+    targets_doc = run_resolve_targets(t, ["example/app"], scan_tag="0.22.0")
+    assert list(by_id(targets_doc)) == ["source-0.22.0", "app-0.22.0"]
+    source = by_id(targets_doc)["source-0.22.0"]
+    assert source["kind"] == "fs"
+    assert (source["tag"], source["git_ref"], source["commit_sha"]) == (
+        "0.22.0",
+        "0.22.0",
+        "d" * 40,
+    )
+    assert source["status"] == "pending"
+    image = by_id(targets_doc)["app-0.22.0"]
+    assert image["ref"] == "ghcr.io/example/app:0.22.0"
+    assert image["status"] == "pending"
+    # the header keeps the default branch as context, the tag as the scan ref
+    assert targets_doc["default_branch"] == "development"
+    assert targets_doc["commit_sha"] == "a" * 40
+    assert targets_doc["scan_ref"] == "0.22.0"
+
+
+def test_focus_run_never_lists_releases_and_has_no_development_target() -> None:
+    t = FakeRunner()
+    focus_routes(t, "0.22.0")
+    t.add(tags_url("example/app"), tags_out(["development", "0.22.0"]))
+    targets_doc = run_resolve_targets(t, ["example/app"], scan_tag="0.22.0")
+    assert not any("releases" in url for url in t.urls)
+    assert "app-development" not in by_id(targets_doc)
+    assert "source-development" not in by_id(targets_doc)
+    matrix = rt.build_matrix(targets_doc)
+    assert [m["id"] for m in matrix] == ["source-0.22.0", "app-0.22.0"]
+    assert all(set(m) == TARGET_KEYS for m in matrix)
+
+
+@pytest.mark.parametrize(
+    ("git_tag", "registry_tag"), [("1.2.3", "1.2.3"), ("v1.2.3", "1.2.3")]
+)
+def test_focus_image_matches_the_v_stripped_registry_tag(
+    git_tag: str, registry_tag: str
+) -> None:
+    t = FakeRunner()
+    focus_routes(t, git_tag)
+    t.add(tags_url("example/app"), tags_out(["development", registry_tag]))
+    targets = by_id(run_resolve_targets(t, ["example/app"], scan_tag=git_tag))
+    assert targets[f"app-{git_tag.removeprefix('v')}"]["status"] == "pending"
+
+
+def test_focus_image_missing_the_tag_is_not_applicable() -> None:
+    t = FakeRunner()
+    focus_routes(t, "0.22.0")
+    t.add(tags_url("example/app-bff"), tags_out(["development", "0.21.4"]))
+    targets = by_id(run_resolve_targets(t, ["example/app-bff"], scan_tag="0.22.0"))
+    missing = targets["app-bff-0.22.0"]
+    assert missing["status"] == "not_applicable"
+    assert missing["reason"] == "release 0.22.0 not published for this image"
+    assert missing["ref"] == "ghcr.io/example/app-bff:0.22.0"
+
+
+def test_focus_image_listing_failure_fails_the_image() -> None:
+    t = FakeRunner()
+    focus_routes(t, "0.22.0")
+    t.add(tags_url("example/app"), http_error(404))
+    targets = by_id(run_resolve_targets(t, ["example/app"], scan_tag="0.22.0"))
+    failed = targets["app-0.22.0"]
+    assert failed["status"] == "failed"
+    assert "HTTP 404" in failed["reason"]
+
+
+def test_focus_run_with_an_unresolvable_tag_fails() -> None:
+    t = FakeRunner()
+    github_routes(t, [])
+    t.add(f"repos/{REPOSITORY}/commits/refs/tags/0.22.0", http_error(404))
+    with pytest.raises(rt.ResolveError, match="HTTP 404"):
+        run_resolve_targets(t, ["example/app"], scan_tag="0.22.0")
+
+
+def test_focus_run_id_is_sanitized_and_unique(tmp_path: Path) -> None:
+    t = FakeRunner()
+    focus_routes(t, "release/1.0")
+    t.add(tags_url("example/some_image"), tags_out(["release-1.0"]))
+    targets_doc = run_resolve_targets(t, ["example/some_image"], scan_tag="release/1.0")
+    assert list(by_id(targets_doc)) == ["source-release-1.0", "some_image-release-1.0"]
+    ids = [t2["id"] for t2 in targets_doc["targets"]]
+    assert len(ids) == 4
+    assert len({(t2["scanner"], t2["id"]) for t2 in targets_doc["targets"]}) == 4
+
+
+def test_focus_run_with_empty_images_is_source_only() -> None:
+    t = FakeRunner()
+    focus_routes(t, "0.22.0")
+    targets_doc = run_resolve_targets(t, [], scan_tag="0.22.0")
+    assert list(by_id(targets_doc)) == ["source-0.22.0"]
+    assert not any(url.startswith("ghcr.io/") for url in t.urls)
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\t\n"])
+def test_whitespace_scan_tag_behaves_as_a_regular_run(tmp_path: Path, raw: str) -> None:
+    t = FakeRunner()
+    github_routes(t, [stable("1.1.14", "2025-01-01T00:00:00Z")])
+    inputs = rt.Inputs.from_environ(run_env(tmp_path, SCAN_TAG=raw))
+    assert inputs.scan_tag is None
+    targets_doc = rt.resolve_targets(
+        inputs, rt.GitHubClient(t), rt.RegistryClient(t, "ghcr.io"), ENV
+    )
+    assert list(by_id(targets_doc)) == ["source-development", "source-1.1.14"]
+    assert "scan_ref" not in targets_doc
+
+
+@pytest.mark.parametrize("missing", ["GITHUB_EVENT_NAME", "GITHUB_TRIGGERING_ACTOR"])
+def test_run_without_the_event_header_fails(tmp_path: Path, missing: str) -> None:
+    env = {k: v for k, v in ENV.items() if k != missing}
+    t = FakeRunner()
+    github_routes(t, [])
+    inputs = rt.Inputs(repository=REPOSITORY, caller_repository=CALLER)
+    with pytest.raises(rt.ResolveError, match=missing):
+        rt.resolve_targets(
+            inputs, rt.GitHubClient(t), rt.RegistryClient(t, "ghcr.io"), env
+        )
+
+
+def test_document_header_carries_event_actor_and_the_scan_ref() -> None:
+    t = FakeRunner()
+    github_routes(t, [])
+    targets_doc = run_resolve_targets(t, [])
+    assert targets_doc["event"] == "workflow_dispatch"
+    assert targets_doc["actor"] == "octocat"
+    assert "scan_ref" not in targets_doc
+    t = FakeRunner()
+    focus_routes(t, "0.22.0")
+    focused = run_resolve_targets(t, [], scan_tag="0.22.0")
+    assert focused["event"] == "workflow_dispatch"
+    assert focused["actor"] == "octocat"
+    assert focused["scan_ref"] == "0.22.0"
+
+
+def test_focus_run_target_schema_is_uniform() -> None:
+    t = FakeRunner()
+    focus_routes(t, "0.22.0")
+    t.add(tags_url("example/app"), tags_out(["development", "0.22.0"]))
+    targets_doc = run_resolve_targets(t, ["example/app"], scan_tag="0.22.0")
+    kinds = {x["kind"] for x in targets_doc["targets"]}
+    assert kinds == {"fs", "image"}
+    trivy_targets = list(trivy(targets_doc).values())
+    matrix = rt.build_matrix(targets_doc)
+    assert all(set(m) == {"id", "kind", "ref", "commit_sha"} for m in matrix)
+    for target in trivy_targets:
+        assert set(target) == TARGET_KEYS | {
+            "scanner",
+            "image",
+            "tag",
+            "git_ref",
+            "status",
+            "reason",
+        }
+        if target["kind"] == "image":
+            assert target["git_ref"] is None
+            assert target["commit_sha"] is None
+        else:
+            assert target["git_ref"]
+            assert target["commit_sha"]
+    twins = osv_twins(targets_doc)
+    assert twins["source-0.22.0"]["status"] == "pending"
+    assert twins["app-0.22.0"]["status"] == "pending"
 
 

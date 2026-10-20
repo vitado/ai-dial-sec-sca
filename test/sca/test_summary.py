@@ -215,6 +215,26 @@ def test_header_has_the_commit_the_tool_versions_and_the_run():
     assert "[run 7](https://example.test/run/7)" in header
 
 
+def test_a_regular_header_names_no_one_offs():
+    text = build_summary(report([target("s")], []))
+    assert "Focused on tag" not in text
+    assert "OSV image scan" not in text
+
+
+def test_the_header_names_the_focus_run_and_its_tag():
+    doc = report([target("s")], [])
+    doc["scan_ref"] = "0.22.0"
+    text = build_summary(doc)
+    assert "Focused on tag `0.22.0`" in text
+
+
+def test_the_header_names_a_forced_image_scan():
+    doc = report([target("s")], [])
+    doc["forced_image_scan"] = True
+    text = build_summary(doc)
+    assert "The direct OSV image scan runs on this run although it is off" in text
+
+
 def test_results_by_target_count_unique_vulnerabilities_per_class():
     text = build_summary(sample())
     # CVE-1 counts once, with Trivy's severity

@@ -233,7 +233,25 @@ def header(report: Mapping[str, Any]) -> list[str]:
     ]
     if report["run_url"]:
         parts.append(f"[run {report['run_id']}]({report['run_url']})")
-    return [f"# SCA · {report['repo']}", "", " · ".join(parts), ""]
+    lines = [f"# SCA · {report['repo']}", "", " · ".join(parts), ""]
+    one_offs = one_off_lines(report)
+    if one_offs:
+        lines += [*one_offs, ""]
+    return lines
+
+
+def one_off_lines(report: Mapping[str, Any]) -> list[str]:
+    """What this run covers beyond the regular release set, when it does: a focus
+    run on one tag, a direct OSV image scan forced for the run."""
+    lines = []
+    if scan_ref := report.get("scan_ref"):
+        lines.append(f"Focused on tag `{scan_ref}` (a manual run on one tag).")
+    if report.get("forced_image_scan"):
+        lines.append(
+            "The direct OSV image scan runs on this run although it is off for the "
+            "repository."
+        )
+    return lines
 
 
 def results_by_target(report: Mapping[str, Any]) -> list[str]:

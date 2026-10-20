@@ -206,6 +206,15 @@ def run_merge(
         "run_id": doc["run_id"],
         "run_url": doc["run_url"],
         "generated_utc": generated_utc,
+        # event and actor are every-run fields, scan_ref and forced_image_scan are
+        # one-offs: copied if present, absent means the run has none
+        **(
+            {
+                k: doc[k]
+                for k in ("event", "actor", "scan_ref", "forced_image_scan")
+                if k in doc
+            }
+        ),
         "tools": tools,
         "targets": entries,
         "findings": list(findings.values()),

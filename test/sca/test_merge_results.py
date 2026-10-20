@@ -71,7 +71,7 @@ def target(tid, scanner, kind="fs", status="pending", reason=None):
 class Run:
     """A targets file and a parts directory in a temp directory."""
 
-    def __init__(self, tmp_path: Path, targets):
+    def __init__(self, tmp_path: Path, targets, header: dict | None = None):
         self.parts, self.out = tmp_path / "parts", tmp_path / "out"
         self.targets_file = tmp_path / "targets.json"
         self.targets_file.write_text(
@@ -83,6 +83,7 @@ class Run:
                     "run_id": "1",
                     "run_url": "https://example.test/run/1",
                     "targets": targets,
+                    **(header or {}),
                 }
             )
         )
@@ -294,3 +295,43 @@ def test_a_flag_bearing_image_target_reaches_the_report(tmp_path):
     assert failed == 0
     assert {t["status"] for t in report["targets"]} == {"ok"}
     assert "image_scan_disabled" in report["targets"][0]
+
+
+# --- the header fields of a one-off run ------------------------------------------
+
+
+def test_a_regular_run_has_no_one_off_header_fields(tmp_path):
+    run = Run(tmp_path, [target("s", "trivy")])
+    run.part("trivy", "s", trivy_native(), {"status": "ok"})
+    report = run.merge()[1]
+    assert "event" not in report
+    assert "actor" not in report
+    assert "scan_ref" not in report
+    assert "forced_image_scan" not in report
+
+
+def test_the_header_fields_of_a_focus_run_reach_the_report(tmp_path):
+    header = {
+        "event": "workflow_dispatch",
+        "actor": "octocat",
+        "scan_ref": "0.22.0",
+    }
+    run = Run(tmp_path, [target("s", "trivy")], header)
+    run.part("trivy", "s", trivy_native(), {"status": "ok"})
+    report = run.merge()[1]
+    assert report["event"] == "workflow_dispatch"
+    assert report["actor"] == "octocat"
+    assert report["scan_ref"] == "0.22.0"
+
+
+def test_a_forced_image_scan_reaches_the_report(tmp_path):
+    header = {
+        "event": "workflow_dispatch",
+        "actor": "octocat",
+        "forced_image_scan": True,
+    }
+    run = Run(tmp_path, [target("s", "trivy")], header)
+    run.part("trivy", "s", trivy_native(), {"status": "ok"})
+    report = run.merge()[1]
+    assert report["forced_image_scan"] is True
+    assert "scan_ref" not in report

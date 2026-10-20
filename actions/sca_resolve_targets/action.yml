@@ -17,6 +17,9 @@ inputs:
   release-lines:
     description: How many newest minor release lines are scanned (one latest patch each), plus the newest release candidate if any
     default: "2"
+  scan-tag:
+    description: Focus the run on this one git tag - its source and the tag itself in every image - instead of the release set
+    default: ""
   github-token:
     description: Token for the GitHub API and for authenticating to ghcr.io
     default: ${{ github.token }}
@@ -53,6 +56,7 @@ runs:
         IMAGES: ${{ inputs.images }}
         IMAGE_SCAN: ${{ inputs.osv-image-scan }}
         RELEASE_LINES: ${{ inputs.release-lines }}
+        SCAN_TAG: ${{ inputs.scan-tag }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         ACTION_PATH: ${{ github.action_path }}

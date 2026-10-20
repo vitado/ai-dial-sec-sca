@@ -1,13 +1,13 @@
 # ai-dial-sec-sca
 
-Composite GitHub Actions that run the software composition analysis (SCA) scan of AI DIAL repositories: [Trivy](https://trivy.dev/) finds known vulnerabilities, the language packages it found are then checked against [OSV](https://osv.dev/), and the results are merged into one report.
+Composite GitHub Actions that run the software composition analysis (SCA) scan of AI DIAL repositories: [Trivy](https://trivy.dev/) finds known vulnerabilities in every target, [OSV](https://osv.dev/) then checks the language packages Trivy found plus, for image targets, the image itself (its OS packages included), and the results are merged into one report.
 
 These actions are called by the `sca_scheduled.yml` workflow of [epam/ai-dial-ci](https://github.com/epam/ai-dial-ci). They are not meant to be used directly: repositories call that workflow, which orchestrates the scan and the actions below.
 
 ## Actions
 
-- `actions/sca_resolve_targets`: builds the list of scan targets (default branch source, latest release source, images) and resolves the release.
-- `actions/sca_query_osv`: checks the language packages found by Trivy against OSV with osv-scanner.
+- `actions/sca_resolve_targets`: builds the list of scan targets (default branch source, latest release source, images) and resolves the release. Carries the `osv-image-scan` flag (per repository) that switches the direct OSV image scan off.
+- `actions/sca_query_osv`: checks the language packages found by Trivy against OSV with osv-scanner; an image target also gets a direct `osv-scanner scan image`, which reads the image's own package database and so checks its OS packages against OSV correctly (a BOM cannot: OSV keys its records by the source package name). The BOM query runs either way, so a package either detector sees keeps its OSV check.
 - `actions/sca_merge_results`: normalizes the Trivy and OSV reports, merges them into `report.json` and writes the `summary.md` job summary.
 - `actions/generate_gradle_lockfiles`: generates Gradle lockfiles on the fly so Trivy can resolve Gradle dependencies (repository files are not modified).
 

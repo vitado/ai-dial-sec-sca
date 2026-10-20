@@ -272,7 +272,13 @@ def results_by_target(report: Mapping[str, Any]) -> list[str]:
     )
     lines.append(f"| **All targets** | | | | | {lang} | {os_} |")
     legend = SEPARATOR.join(f"{s[0]} {s.lower()}" for s in SEVERITIES)
-    return [*lines, "", f"{legend} — unique vulnerabilities (id + package + version)"]
+    # OS packages dedupe without the version: the scanners spell one dpkg version
+    # differently, so the version distinguishes unique library rows only
+    return [
+        *lines,
+        "",
+        f"{legend} — unique vulnerabilities (id + package; version for libraries only)",
+    ]
 
 
 def build_summary(report: Mapping[str, Any]) -> str:

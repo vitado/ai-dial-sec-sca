@@ -315,13 +315,37 @@ def test_empty_images_only_sources() -> None:
     assert not any(url.startswith("ghcr.io/") for url in t.urls)
 
 
-def test_id_collision_rejected() -> None:
+def test_the_same_image_twice_is_an_id_collision() -> None:
+    t = FakeRunner()
+    github_routes(t, [])
+    t.add(tags_url("a/x"), tags_out(["development"]))
+    with pytest.raises(rt.ResolveError, match="collision"):
+        run_resolve_targets(t, ["a/x", "a/x"])
+
+
+def test_images_with_the_same_last_segment_get_the_full_name_in_the_id() -> None:
     t = FakeRunner()
     github_routes(t, [])
     t.add(tags_url("a/x"), tags_out(["development"]))
     t.add(tags_url("b/x"), tags_out(["development"]))
-    with pytest.raises(rt.ResolveError, match="collision"):
-        run_resolve_targets(t, ["a/x", "b/x"])
+    t.add(tags_url("c/y"), tags_out(["development"]))
+    targets = by_id(run_resolve_targets(t, ["a/x", "b/x", "c/y"]))
+    assert [i for i in targets if i.endswith("-development")] == [
+        "source-development",
+        "a-x-development",
+        "b-x-development",
+        "y-development",
+    ]
+    assert targets["b-x-development"]["ref"] == "ghcr.io/b/x:development"
+
+
+def test_a_focus_run_names_colliding_images_by_the_full_name() -> None:
+    t = FakeRunner()
+    focus_routes(t, "0.22.0")
+    t.add(tags_url("a/x"), tags_out(["0.22.0"]))
+    t.add(tags_url("b/x"), tags_out(["0.22.0"]))
+    targets = by_id(run_resolve_targets(t, ["a/x", "b/x"], scan_tag="0.22.0"))
+    assert list(targets) == ["source-0.22.0", "a-x-0.22.0", "b-x-0.22.0"]
 
 
 def test_matrix_has_only_pending_targets_without_status() -> None:
@@ -1555,7 +1579,9 @@ def test_whitespace_scan_tag_behaves_as_a_regular_run(tmp_path: Path, raw: str) 
     assert "scan_ref" not in targets_doc
 
 
-@pytest.mark.parametrize("missing", ["GITHUB_EVENT_NAME", "GITHUB_TRIGGERING_ACTOR"])
+@pytest.mark.parametrize(
+    "missing", ["GITHUB_RUN_ID", "GITHUB_EVENT_NAME", "GITHUB_TRIGGERING_ACTOR"]
+)
 def test_run_without_the_event_header_fails(tmp_path: Path, missing: str) -> None:
     env = {k: v for k, v in ENV.items() if k != missing}
     t = FakeRunner()

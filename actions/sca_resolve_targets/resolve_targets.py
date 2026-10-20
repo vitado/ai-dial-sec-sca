@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,14 +185,16 @@ def make_target(
     ref: str | None = None,
     git_ref: str | None = None,
     commit_sha: str | None = None,
+    stem: str | None = None,
 ) -> dict[str, Any]:
     """A Trivy target: an image (``ref`` is its reference), or the source at
     ``git_ref`` pinned to ``commit_sha`` (a release source has a ``tag`` too).
 
     The id names the subject and is stable across runs, so it never contains the
-    SHA; without a known tag it ends with ``release``.
+    SHA; without a known tag it ends with ``release``. An image is named by its
+    ``stem`` (see ``image_stems``), the source by ``source``.
     """
-    stem = image.rsplit("/", 1)[-1] if image else "source"
+    stem = stem or (image.rsplit("/", 1)[-1] if image else "source")
     return {
         "id": UNSAFE_ID_CHARS.sub("-", f"{stem}-{tag or git_ref or 'release'}"),
         "scanner": "trivy",
@@ -322,59 +325,68 @@ def resolve_release_set(
     )
 
 
+def image_stems(images: Sequence[str]) -> dict[str, str]:
+    """The id stem of each image: its last path segment, or the whole name if another
+    image of the list ends alike (``a/x`` and ``b/x`` would give one id). The same
+    image listed twice still collides, which ``check_unique_ids`` reports."""
+    last = {image: image.rsplit("/", 1)[-1] for image in set(images)}
+    counts = Counter(last.values())
+    return {image: name if counts[name] == 1 else image for image, name in last.items()}
+
+
 def image_target(
     registry: RegistryClient,
     image: str,
     tag: str | None,
     status: str,
     reason: str | None = None,
+    stem: str | None = None,
 ) -> dict[str, Any]:
     """An image target of ``registry``: the reference is the image at ``tag``."""
     ref = f"{registry.registry}/{image}:{tag}" if tag else None
-    return make_target(status, reason, image=image, tag=tag, ref=ref)
+    return make_target(status, reason, image=image, tag=tag, ref=ref, stem=stem)
+
+
+def find_registry_tag(tags: Sequence[str], git_tag: str) -> str | None:
+    """The registry tag of a git tag: the registry tag may lack the ``v`` of the git
+    tag."""
+    return next((t for t in (git_tag, git_tag.removeprefix("v")) if t in tags), None)
 
 
 def resolve_image_targets(
-    registry: RegistryClient, image: str, releases: Sequence[Release]
+    registry: RegistryClient,
+    image: str,
+    releases: Sequence[Release],
+    stem: str | None = None,
 ) -> list[dict[str, Any]]:
     """Targets of one image: the ``development`` tag and every release tag of the
     set (one tags listing per image, the ``development`` target once)."""
+
+    def target(tag, status, reason=None):
+        return image_target(registry, image, tag, status, reason, stem)
+
     try:
         tags = registry.tags(image)
     except ResolveError as err:
         return [
-            image_target(registry, image, "development", "failed", str(err)),
-            *[
-                image_target(registry, image, r.tag, "failed", str(err))
-                for r in releases
-            ],
+            target("development", "failed", str(err)),
+            *[target(r.tag, "failed", str(err)) for r in releases],
         ]
 
     if "development" in tags:
-        targets = [image_target(registry, image, "development", "pending")]
+        targets = [target("development", "pending")]
     else:
         reason = "tag development not published for this image"
-        targets = [
-            image_target(registry, image, "development", "not_applicable", reason)
-        ]
+        targets = [target("development", "not_applicable", reason)]
 
     for release in releases:
         if release.tag is None:
-            targets.append(
-                image_target(
-                    registry, image, None, "not_applicable", "no GitHub release"
-                )
-            )
-            continue
-        # the registry tag may lack the ``v`` of the git tag
-        candidates = (release.tag, release.tag.removeprefix("v"))
-        if found := next((t for t in candidates if t in tags), None):
-            targets.append(image_target(registry, image, found, "pending"))
+            targets.append(target(None, "not_applicable", "no GitHub release"))
+        elif found := find_registry_tag(tags, release.tag):
+            targets.append(target(found, "pending"))
         else:
             reason = f"release {release.tag} not published for this image"
-            targets.append(
-                image_target(registry, image, release.tag, "not_applicable", reason)
-            )
+            targets.append(target(release.tag, "not_applicable", reason))
     return targets
 
 
@@ -400,20 +412,18 @@ def resolve_release_source_target(
 
 
 def resolve_focus_image_targets(
-    registry: RegistryClient, image: str, tag: str
+    registry: RegistryClient, image: str, tag: str, stem: str | None = None
 ) -> list[dict[str, Any]]:
     """The image targets of a focus run: the scan tag only, no ``development``
     (a manual run of one tag is not about the moving branch head)."""
     try:
         tags = registry.tags(image)
     except ResolveError as err:
-        return [image_target(registry, image, tag, "failed", str(err))]
-    # the registry tag may lack the ``v`` of the git tag
-    candidates = (tag, tag.removeprefix("v"))
-    if found := next((t for t in candidates if t in tags), None):
-        return [image_target(registry, image, found, "pending")]
+        return [image_target(registry, image, tag, "failed", str(err), stem)]
+    if found := find_registry_tag(tags, tag):
+        return [image_target(registry, image, found, "pending", stem=stem)]
     reason = f"release {tag} not published for this image"
-    return [image_target(registry, image, tag, "not_applicable", reason)]
+    return [image_target(registry, image, tag, "not_applicable", reason, stem)]
 
 
 def resolve_focus_targets(
@@ -427,8 +437,9 @@ def resolve_focus_targets(
     itself. An unresolvable tag fails the run: there is no set to fall back to."""
     sha = github.tag_commit_sha(repository, tag)
     targets = [make_target("pending", tag=tag, git_ref=tag, commit_sha=sha)]
+    stems = image_stems(images)
     for image in images:
-        targets.extend(resolve_focus_image_targets(registry, image, tag))
+        targets.extend(resolve_focus_image_targets(registry, image, tag, stems[image]))
     return targets
 
 
@@ -527,8 +538,11 @@ def resolve_release_targets(
         targets.append(
             resolve_release_source_target(github, repository, release_set.candidate)
         )
+    stems = image_stems(images)
     for image in images:
-        targets.extend(resolve_image_targets(registry, image, image_releases))
+        targets.extend(
+            resolve_image_targets(registry, image, image_releases, stems[image])
+        )
     return targets
 
 
@@ -576,14 +590,14 @@ def resolve_targets(
     targets.extend([make_osv_target(t, image_scan_disabled=disabled) for t in targets])
     check_unique_ids(targets)
 
-    run_id = environ["GITHUB_RUN_ID"]
     missing = [
         name
-        for name in ("GITHUB_EVENT_NAME", "GITHUB_TRIGGERING_ACTOR")
+        for name in ("GITHUB_RUN_ID", "GITHUB_EVENT_NAME", "GITHUB_TRIGGERING_ACTOR")
         if not environ.get(name)
     ]
     if missing:
         raise ResolveError(f"missing environment variable(s): {', '.join(missing)}")
+    run_id = environ["GITHUB_RUN_ID"]
     event = environ["GITHUB_EVENT_NAME"]
     actor = environ["GITHUB_TRIGGERING_ACTOR"]
     run_url = f"{environ['GITHUB_SERVER_URL']}/{inputs.caller_repository}"

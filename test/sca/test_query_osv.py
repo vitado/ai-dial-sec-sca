@@ -323,6 +323,61 @@ def test_a_missing_osv_scanner_is_exit_127(tmp_path: Path) -> None:
     assert result.stderr
 
 
+def record_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[float | None]:
+    seen: list[float | None] = []
+
+    def fake_run(command: Sequence[str], **kwargs: Any) -> Any:
+        seen.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(qo.subprocess, "run", fake_run)
+    return seen
+
+
+def test_every_command_has_a_timeout_and_an_image_scan_a_longer_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = record_timeouts(monkeypatch)
+    qo.run_command(["trivy", "convert"])
+    qo.run_command(["osv-scanner", "scan", "source", "-L", "x"])
+    qo.run_command(["docker", "image", "rm", "ref"])
+    qo.run_command(["osv-scanner", "scan", "image", "ref"])
+    assert seen == [
+        qo.COMMAND_TIMEOUT_SECONDS,
+        qo.COMMAND_TIMEOUT_SECONDS,
+        qo.COMMAND_TIMEOUT_SECONDS,
+        qo.IMAGE_SCAN_TIMEOUT_SECONDS,
+    ]
+    assert qo.IMAGE_SCAN_TIMEOUT_SECONDS > qo.COMMAND_TIMEOUT_SECONDS
+
+
+def test_a_command_that_times_out_is_exit_124(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command: Sequence[str], **kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(qo.subprocess, "run", fake_run)
+    result = qo.run_command(["osv-scanner", "scan", "image", "ref"])
+    assert result.returncode == 124
+    assert "timed out" in result.stderr
+
+
+def test_a_scan_that_times_out_fails_its_target_and_the_loop_goes_on(
+    tmp_path: Path,
+) -> None:
+    class Hanging(FakeCommands):
+        def __call__(self, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+            if list(command[1:3]) == ["scan", "source"]:
+                return subprocess.CompletedProcess(command, 124, "", "timed out")
+            return super().__call__(command)
+
+    ws = Workspace(tmp_path)
+    ws.run(Hanging())
+    status = ws.status()
+    assert status["status"] == "failed"
+    assert "exit 124" in status["reason"]
+    assert "timed out" in status["reason"]
+
+
 def test_the_reason_is_the_end_of_stderr_and_is_cut(tmp_path: Path) -> None:
     ws = Workspace(tmp_path)
     ws.run(FakeCommands(scanner_exit=2, scanner_stderr="x" * 5000 + " the end"))

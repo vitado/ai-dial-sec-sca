@@ -25,7 +25,8 @@ scanner_version}``) and, if ``ok``, ``osv/<id>.json``, the osv-scanner output as
 
 osv-scanner exits 0 (nothing found) or 1 (vulnerabilities found); any other exit code
 is a failure, so a broken run never looks like a clean one - a failed image scan fails
-its target even though the BOM query succeeded. A target whose Trivy target was not
+its target even though the BOM query succeeded. A command has a timeout (a hung one is
+exit code 124, a failed target with that reason). A target whose Trivy target was not
 scanned is ``not_applicable``. The merge fails an output that is not a valid result.
 The script exits 0: the workflow decides about failing the run.
 """
@@ -48,6 +49,10 @@ OS_PURL_TYPES = frozenset({"deb", "apk", "rpm"})
 # osv-scanner: 0 nothing found, 1 vulnerabilities found
 EXIT_CODES_OK = (0, 1)
 REASON_LIMIT = 400
+# A command that hangs must not take the rest of the run with it (the job has one
+# bound for all targets): the pull of an image takes the longest.
+COMMAND_TIMEOUT_SECONDS = 600.0
+IMAGE_SCAN_TIMEOUT_SECONDS = 1200.0
 # An image target whose direct image scan is switched off for the repository
 IMAGE_SCAN_DISABLED_REASON = (
     "osv image scan disabled for this repository (image too large for the runner "
@@ -58,10 +63,26 @@ Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
 
 def run_command(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    """Run a command; a program that cannot start is exit code 127 (as in a shell)."""
+    """Run a command; a program that cannot start is exit code 127 (as in a shell),
+    one that outlives its timeout is exit code 124 (as in ``timeout``), so a hung
+    target fails with a reason and the next target still runs."""
+    timeout = (
+        IMAGE_SCAN_TIMEOUT_SECONDS
+        if list(command[1:3]) == ["scan", "image"]
+        else COMMAND_TIMEOUT_SECONDS
+    )
     try:
         return subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            command, 124, "", f"timed out after {timeout:.0f}s"
         )
     except OSError as err:
         return subprocess.CompletedProcess(command, 127, "", str(err))

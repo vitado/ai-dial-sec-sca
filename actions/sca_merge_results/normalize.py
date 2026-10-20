@@ -305,14 +305,18 @@ def borrow_source_chains(
     findings: Findings,
     inventories: Mapping[str, Inventory],
     source_targets: Sequence[Mapping[str, Any]],
+    image_targets: Sequence[Mapping[str, Any]],
 ) -> None:
     """A language package of an image without a chain (an image has no graph) takes
     the chain of the same package and version from a source target of the repo: the
     source of its own release tag first, else the first source where the package
     and version match. The dev flag is not borrowed: what is in an image is shipped.
+    The release of an image is the ``ref`` of its target (the registry tag, which may
+    lack the ``v`` of the git tag the source's ``ref`` is).
     """
     sources = [(t["id"], t.get("ref") or "") for t in source_targets]
     source_ids = {sid for sid, _ in sources}
+    image_refs = {t["id"]: t.get("ref") or "" for t in image_targets}
 
     def borrow(row, sid: str) -> bool:
         known = inventories.get(sid, {}).get((norm(row["pkg"]), row["version"]))
@@ -325,10 +329,10 @@ def borrow_source_chains(
     for row in findings.values():
         if row["class"] != "lang" or row["chain"] or row["target"] in source_ids:
             continue
-        release_tag = row["target"].rsplit("-", 1)[-1]
+        release_tag = image_refs.get(row["target"], "")
         # the source of the release the image was built from, then the rest
         for sid, ref in sources:
-            if borrow(row, sid) and ref == release_tag:
+            if borrow(row, sid) and ref.removeprefix("v") == release_tag:
                 break
         else:
             for sid, _ in sources:

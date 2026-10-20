@@ -196,7 +196,10 @@ def run_merge(
     source_targets = [
         e for e in entries if e["scanner"] == "trivy" and e["kind"] == "fs"
     ]
-    borrow_source_chains(findings, inventories, source_targets)
+    image_targets = [
+        e for e in entries if e["scanner"] == "trivy" and e["kind"] == "image"
+    ]
+    borrow_source_chains(findings, inventories, source_targets, image_targets)
 
     report = {
         "schema_version": SCHEMA_VERSION,

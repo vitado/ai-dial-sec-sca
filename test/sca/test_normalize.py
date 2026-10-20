@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from normalize import (
     apply_gradle_graph,
     borrow_source_chains,
@@ -180,6 +182,7 @@ def test_an_image_package_borrows_the_chain_of_the_source_not_its_dev_flag():
         findings,
         {"source-development": src_inventory},
         [{"id": "source-development", "ref": "development"}],
+        [{"id": "app-development", "ref": "development"}],
     )
     assert rows[0]["chain"] == ["top", "jar"] and rows[0]["relationship"] == "indirect"
     assert rows[0]["dev"] is False
@@ -191,6 +194,7 @@ def test_an_image_package_the_source_does_not_have_stays_without_a_chain():
         dict(enumerate(rows)),
         {"source-development": {}},
         [{"id": "source-development", "ref": "development"}],
+        [{"id": "app-development", "ref": "development"}],
     )
     assert rows[0]["chain"] == []
 
@@ -212,8 +216,37 @@ def test_an_image_package_of_a_release_borrows_the_same_tag_source_first():
             {"id": "source-development", "ref": "development"},
             {"id": "source-0.21.4", "ref": "0.21.4"},
         ],
+        [{"id": "app-0.21.4", "ref": "0.21.4"}],
     )
     # the release's own graph wins over development's
+    assert rows[0]["chain"] == ["rel", "jar"]
+
+
+@pytest.mark.parametrize(
+    ("git_tag", "registry_tag"),
+    [("1.0.0-rc.1", "1.0.0-rc.1"), ("v1.0.0-rc.1", "1.0.0-rc.1")],
+)
+def test_an_image_of_a_hyphenated_tag_borrows_from_its_own_release_source(
+    git_tag, registry_tag
+):
+    _, dev_inventory = trivy(
+        result([package("top", depends_on=["jar"], rel="direct"), package("jar", rel="indirect")])
+    )
+    _, rel_inventory = trivy(
+        result([package("rel", depends_on=["jar"], rel="direct"), package("jar", rel="indirect")]),
+        tid="source-rc",
+    )
+    image = result([package("Jar")], [vuln("Jar")], target="app/jar", rtype="jar")
+    rows, _ = trivy(image, tid="app-rc")
+    borrow_source_chains(
+        dict(enumerate(rows)),
+        {"source-development": dev_inventory, "source-rc": rel_inventory},
+        [
+            {"id": "source-development", "ref": "development"},
+            {"id": "source-rc", "ref": git_tag},
+        ],
+        [{"id": "app-rc", "ref": registry_tag}],
+    )
     assert rows[0]["chain"] == ["rel", "jar"]
 
 

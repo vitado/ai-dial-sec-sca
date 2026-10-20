@@ -227,6 +227,7 @@ def parse_images(raw: str) -> list[str]:
 
 
 VERSION_TAG = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+PRERELEASE_TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)-([0-9A-Za-z.-]+)$")
 
 
 class Release(NamedTuple):
@@ -249,11 +250,27 @@ class ReleaseSet(NamedTuple):
     unmatched: list[Release]
 
 
-def release_line(tag: str) -> tuple[int, int] | None:
-    """The ``X.Y`` minor line of an ``X.Y.Z`` tag."""
+def stable_version(tag: str) -> tuple[int, int, int] | None:
+    """The version of an ``X.Y.Z`` tag; its first two numbers are the minor line."""
     if match := VERSION_TAG.fullmatch(tag):
-        return int(match[1]), int(match[2])
+        return int(match[1]), int(match[2]), int(match[3])
     return None
+
+
+def prerelease_version(tag: str) -> tuple[tuple[int, int, int], tuple] | None:
+    """The sort key of an ``X.Y.Z-pre`` tag (an optional ``v`` is allowed): the base
+    version, then the prerelease identifiers in semver order (numbers compare
+    numerically and rank below words, a shorter list below a longer one with the same
+    start). None for a tag of another shape."""
+    match = PRERELEASE_TAG.fullmatch(tag)
+    if not match:
+        return None
+    base = (int(match[1]), int(match[2]), int(match[3]))
+    identifiers = tuple(
+        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        for part in match[4].split(".")
+    )
+    return base, identifiers
 
 
 def resolve_release_set(
@@ -261,17 +278,27 @@ def resolve_release_set(
 ) -> ReleaseSet:
     """The releases to scan, read from the flags the repository sets: a stable is
     a release with ``prerelease`` and ``draft`` false, drafts are ignored. A line's
-    patch is its stable published last, so a hotfix lifts the patch, not the line."""
+    patch is its stable published last, so a hotfix lifts the patch, not the line.
+
+    The candidate is the newest prerelease by version (not by date) that is ahead of
+    every stable: its base version is greater than the newest stable's. A prerelease
+    keeps its flag after the final release is published, and that one is then no
+    candidate. A prerelease whose tag is not ``X.Y.Z-pre`` cannot be compared and is
+    ignored."""
     stables_by_line: dict[tuple[int, int], Release] = {}
-    candidates: list[Release] = []
+    newest_stable = (0, 0, 0)
+    prereleases: list[tuple[tuple, Release]] = []
     unmatched: list[Release] = []
     for item in github.releases(repository):
         if item["draft"]:
             continue
         release = Release(item["tag_name"], item["published_at"])
         if item["prerelease"]:
-            candidates.append(release)
-        elif line := release_line(release.tag):
+            if key := prerelease_version(release.tag):
+                prereleases.append((key, release))
+        elif version := stable_version(release.tag):
+            line = version[:2]
+            newest_stable = max(newest_stable, version)
             current = stables_by_line.get(line)
             # first seen wins a tie: GitHub returns the releases newest first
             if current is None or release.published_at > current.published_at:
@@ -279,7 +306,8 @@ def resolve_release_set(
         else:
             unmatched.append(release)
     newest_lines = sorted(stables_by_line, reverse=True)[:release_lines]
-    candidate = max(candidates, key=lambda r: r.published_at, default=None)
+    ahead = [(key, r) for key, r in prereleases if key[0] > newest_stable]
+    candidate = max(ahead, key=lambda pair: pair[0], default=(None, None))[1]
     return ReleaseSet(
         [stables_by_line[line] for line in newest_lines], candidate, unmatched
     )

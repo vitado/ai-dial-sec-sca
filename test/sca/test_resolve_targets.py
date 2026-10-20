@@ -812,7 +812,7 @@ def test_release_set_no_releases_gives_the_source_release_placeholder() -> None:
     assert targets["x-release"]["reason"] == "no GitHub release"
 
 
-def test_release_set_stale_candidate_is_still_the_candidate() -> None:
+def test_release_set_candidate_older_than_the_newest_stable_is_dropped() -> None:
     t = FakeRunner()
     github_routes(
         t,
@@ -823,12 +823,36 @@ def test_release_set_stale_candidate_is_still_the_candidate() -> None:
         ],
     )
     targets = by_id(run_resolve_targets(t, []))
-    assert list(targets) == [
-        "source-development",
-        "source-0.22.0",
-        "source-0.21.4",
-        "source-0.19.0-rc.2",
-    ]
+    assert list(targets) == ["source-development", "source-0.22.0", "source-0.21.4"]
+
+
+def test_release_set_rc_of_a_published_release_is_not_a_candidate() -> None:
+    # the rc keeps its prerelease flag after the final release is out
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            stable("0.45.0", "2025-10-14T00:00:00Z"),
+            candidate("0.45.0-rc.0", "2025-10-09T00:00:00Z"),
+            stable("0.44.1", "2025-09-01T00:00:00Z"),
+            candidate("0.44.0-rc.0", "2025-08-01T00:00:00Z"),
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == ["source-development", "source-0.45.0", "source-0.44.1"]
+
+
+def test_release_set_candidate_of_a_newer_version_is_scanned() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            candidate("0.46.0-rc.0", "2025-10-20T00:00:00Z"),
+            stable("0.45.0", "2025-10-14T00:00:00Z"),
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == ["source-development", "source-0.45.0", "source-0.46.0-rc.0"]
 
 
 def test_release_set_newest_candidate_wins() -> None:
@@ -838,12 +862,45 @@ def test_release_set_newest_candidate_wins() -> None:
         [
             stable("0.22.0", "2025-02-01T00:00:00Z"),
             candidate("0.23.0-rc.1", "2025-03-01T00:00:00Z"),
-            candidate("0.21.5-rc.1", "2025-02-15T00:00:00Z"),
+            candidate("0.23.1-rc.0", "2025-02-15T00:00:00Z"),
         ],
     )
     targets = by_id(run_resolve_targets(t, []))
-    assert "source-0.23.0-rc.1" in targets
-    assert "source-0.21.5-rc.1" not in targets
+    assert "source-0.23.1-rc.0" in targets
+    assert "source-0.23.0-rc.1" not in targets
+
+
+def test_release_set_candidates_are_ordered_by_version_not_by_date() -> None:
+    # rc.10 is newer than rc.9 although it was published first
+    t = FakeRunner()
+    github_routes(
+        t,
+        [
+            candidate("0.23.0-rc.9", "2025-03-02T00:00:00Z"),
+            candidate("0.23.0-rc.10", "2025-03-01T00:00:00Z"),
+            stable("0.22.0", "2025-02-01T00:00:00Z"),
+        ],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    assert "source-0.23.0-rc.10" in targets
+    assert "source-0.23.0-rc.9" not in targets
+
+
+def test_release_set_candidate_without_a_stable_is_scanned() -> None:
+    t = FakeRunner()
+    github_routes(t, [candidate("0.1.0-rc.1", "2025-03-01T00:00:00Z")])
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == ["source-development", "source-0.1.0-rc.1"]
+
+
+def test_release_set_prerelease_with_an_unversioned_tag_is_ignored() -> None:
+    t = FakeRunner()
+    github_routes(
+        t,
+        [stable("0.22.0", "2025-02-01T00:00:00Z"), candidate("nightly", "2025-03-01T00:00:00Z")],
+    )
+    targets = by_id(run_resolve_targets(t, []))
+    assert list(targets) == ["source-development", "source-0.22.0"]
 
 
 def test_release_set_unflagged_rc_is_an_unmatched_release() -> None:

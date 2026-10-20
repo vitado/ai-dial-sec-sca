@@ -903,7 +903,9 @@ def test_release_set_prerelease_with_an_unversioned_tag_is_ignored() -> None:
     assert list(targets) == ["source-development", "source-0.22.0"]
 
 
-def test_release_set_unflagged_rc_is_an_unmatched_release() -> None:
+def test_release_set_unflagged_rc_is_left_out_with_one_notice(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     t = FakeRunner()
     github_routes(
         t,
@@ -913,31 +915,51 @@ def test_release_set_unflagged_rc_is_an_unmatched_release() -> None:
         ],
     )
     targets = by_id(run_resolve_targets(t, []))
-    unmatched = targets["source-0.49.0-rc.1"]
-    assert unmatched["status"] == "not_applicable"
-    assert (
-        unmatched["reason"]
-        == "release tag 0.49.0-rc.1 is not X.Y.Z, so it belongs to no release line"
-    )
-    assert "source-0.49.0-rc.2" not in targets
+    assert list(targets) == ["source-development", "source-0.49.2"]
+    notices = [
+        line for line in capsys.readouterr().out.splitlines() if "::notice" in line
+    ]
+    assert notices == [
+        "::notice title=Releases outside the X.Y.Z lines::1 stable release(s) not "
+        "scanned, the tag is not X.Y.Z (newest: 0.49.0-rc.1)"
+    ]
 
 
-def test_release_set_stable_tag_of_another_shape_is_unmatched() -> None:
+def test_release_set_stable_tags_of_another_shape_give_one_notice(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     t = FakeRunner()
     github_routes(
         t,
         [
             stable("0.22.0", "2025-02-01T00:00:00Z"),
+            stable("dial-8.1.0", "2025-01-03T00:00:00Z"),
+            stable("dial-admin-0.20.0", "2025-01-02T00:00:00Z"),
             stable("release-7", "2025-01-01T00:00:00Z"),
         ],
     )
-    targets = by_id(run_resolve_targets(t, []))
-    unmatched = targets["source-release-7"]
-    assert unmatched["status"] == "not_applicable"
-    assert (
-        unmatched["reason"]
-        == "release tag release-7 is not X.Y.Z, so it belongs to no release line"
-    )
+    doc = run_resolve_targets(t, [])
+    assert list(by_id(doc)) == ["source-development", "source-0.22.0"]
+    assert len(doc["targets"]) == 4  # no row of an OSV twin for a skipped release
+    out = capsys.readouterr().out
+    assert out.count("::notice") == 1
+    assert "3 stable release(s) not scanned" in out
+    assert "(newest: dial-8.1.0)" in out
+
+
+def test_release_set_without_such_releases_gives_no_notice(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    t = FakeRunner()
+    github_routes(t, [stable("0.22.0", "2025-02-01T00:00:00Z")])
+    run_resolve_targets(t, [])
+    assert "::notice" not in capsys.readouterr().out
+
+
+def test_release_set_only_unscannable_releases_have_no_placeholder() -> None:
+    t = FakeRunner()
+    github_routes(t, [stable("dial-8.1.0", "2025-01-01T00:00:00Z")])
+    assert list(by_id(run_resolve_targets(t, []))) == ["source-development"]
 
 
 def test_release_set_drafts_are_ignored() -> None:
@@ -1118,9 +1140,8 @@ def test_release_source_without_github_release_is_not_applicable() -> None:
 
 def test_release_source_id_sanitized() -> None:
     t = FakeRunner()
-    github_routes(t, [stable("rel/1.0", "2025-01-01T00:00:00Z")])
-    tag_routes(t, "rel/1.0", "b" * 40)
-    targets = by_id(run_resolve_targets(t, []))
+    focus_routes(t, "rel/1.0")
+    targets = by_id(run_resolve_targets(t, [], scan_tag="rel/1.0"))
     assert targets["source-rel-1.0"]["git_ref"] == "rel/1.0"
 
 

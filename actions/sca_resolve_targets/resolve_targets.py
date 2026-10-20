@@ -243,7 +243,8 @@ NO_RELEASE = Release(None, "")
 
 class ReleaseSet(NamedTuple):
     """The scan set of releases: the newest patch of each of the last N minor
-    lines, at most one candidate, and stables whose tag matches no line."""
+    lines, at most one candidate, and stables whose tag matches no line (not
+    scanned; only counted in a notice)."""
 
     stables: list[Release]
     candidate: Release | None
@@ -487,6 +488,15 @@ def resolve_release_targets(
     """The targets of the release scan: the default-branch snapshot, the sources
     of the release set and, per image, its ``development`` and release tags."""
     release_set = resolve_release_set(github, repository, release_lines)
+    if release_set.unmatched:
+        newest = max(release_set.unmatched, key=lambda r: r.published_at)
+        print(
+            "::notice title=Releases outside the X.Y.Z lines::"
+            + escape_command_data(
+                f"{len(release_set.unmatched)} stable release(s) not scanned, "
+                f"the tag is not X.Y.Z (newest: {newest.tag})"
+            )
+        )
     if (
         not release_set.stables
         and release_set.candidate is None
@@ -494,7 +504,6 @@ def resolve_release_targets(
     ):
         # the report must show that the repository publishes no releases at all
         release_set = ReleaseSet([NO_RELEASE], None, [])
-    # an unmatched tag belongs to no release line, so no image is looked up for it
     image_releases: list[Release] = [*release_set.stables]
     if release_set.candidate is not None:
         image_releases.append(release_set.candidate)
@@ -506,13 +515,6 @@ def resolve_release_targets(
     if release_set.candidate is not None:
         targets.append(
             resolve_release_source_target(github, repository, release_set.candidate)
-        )
-    for release in release_set.unmatched:
-        reason = (
-            f"release tag {release.tag} is not X.Y.Z, so it belongs to no release line"
-        )
-        targets.append(
-            make_target("not_applicable", reason, tag=release.tag, git_ref=release.tag)
         )
     for image in images:
         targets.extend(resolve_image_targets(registry, image, image_releases))
@@ -533,7 +535,7 @@ def resolve_targets(
     Trivy target has an OSV twin.
 
     Order: the development source, the release sources (newest line first, then
-    the candidate, then the unmatched not-applicable ones), then the targets of
+    the candidate), then the targets of
     each image in ``images`` order.
     """
     repository = inputs.repository

@@ -83,7 +83,15 @@ def package_rows(
         groups.setdefault(key, []).append(f)
     rows = []
     for key, fs in groups.items():
-        cls, version = key[0], key[-1]
+        cls = key[0]
+        # an OS row keeps a version in its cell: the primary scanner's spelling
+        # (Trivy's, else OSV's) - the scanners spell one dpkg version differently,
+        # and both spellings in one cell would read as two installed versions
+        version = (
+            key[-1]
+            if len(key) == 3
+            else next((f for f in fs if f["scanner"] == "trivy"), fs[0])["version"]
+        )
         # the name as written in a source target (lockfile), else the first seen
         pkg = next((f for f in fs if f["target"] in source_ids), fs[0])["pkg"]
         # findings of one vulnerability under different ids merge by shared aliases
@@ -178,11 +186,8 @@ def package_table(
     head += ["Targets", "Scanner"]
     lines = ["| " + " | ".join(head) + " |", "|" + "|".join(["---"] * len(head)) + "|"]
     for r in rows:
-        # an OS package has no version in its cell: the scanners spell the same
-        # version differently (dpkg epochs and revisions), there is no one to prefer
-        name = r["pkg"] if r["class"] == "os" else f"{r['pkg']}@{r['version']}"
         cells = [
-            cell(name),
+            cell(f"{r['pkg']}@{r['version']}"),
             vulnerabilities_cell(r),
             cell(r["fixed"]),
         ]

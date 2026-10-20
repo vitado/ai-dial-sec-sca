@@ -124,7 +124,7 @@ def test_os_rows_of_one_cve_with_differently_spelled_versions_count_once():
     # (bash 5.2.37 vs 5.2.37-2+b10), one CVE of one package is one vulnerability
     tid = "app-1.0"
     findings = [
-        finding(tid, "CVE-9", "bash", "HIGH", cls="os", fixed="5.2.38"),
+        finding(tid, "CVE-9", "bash", "HIGH", cls="os", fixed="5.2.38", version="5.2.37"),
         finding(
             tid, "CVE-9", "bash", "HIGH", scanner="osv", cls="os",
             fixed="5.2.38-2+b11", version="5.2.37-2+b10",
@@ -133,10 +133,12 @@ def test_os_rows_of_one_cve_with_differently_spelled_versions_count_once():
     text = build_summary(report([target(tid, kind="image", ref="1.0")], findings))
     assert line(text, f"| {tid}").endswith("| H–1 |")
     assert line(text, "| **All targets**").endswith("| — | H–1 |")
-    # one package row without a version, both scanners on it
-    row = line(text, "| bash |")
+    # one package row, both scanners on it; the version is Trivy's spelling, the
+    # only one shown - both spellings in one cell would read as two installed
+    # versions
+    row = line(text, "| bash@")
     assert row == (
-        "| bash | [CVE-9](https://example.test/CVE-9) | 5.2.38, 5.2.38-2+b11 |"
+        "| bash@5.2.37 | [CVE-9](https://example.test/CVE-9) | 5.2.38, 5.2.38-2+b11 |"
         " img·1.0 | T+O |"
     )
     assert "1 packages, 1 vulnerabilities, 1 fixable" in text
@@ -281,7 +283,7 @@ def test_os_packages_are_a_separate_table_without_chain_columns():
     )
     assert "| Package@version | Vulnerabilities | Fixed | Targets | Scanner |" in text
     assert (
-        "| zlib | [CVE-4](https://example.test/CVE-4) | 1.4 | img·1.0 | T |" in text
+        "| zlib@1.3 | [CVE-4](https://example.test/CVE-4) | 1.4 | img·1.0 | T |" in text
     )
 
 

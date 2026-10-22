@@ -218,6 +218,40 @@ def test_no_latest_when_there_is_no_release():
     assert all(not r["latest"] for r in versions)
 
 
+def test_a_failed_release_is_not_latest():
+    # sample(): 2.0 is the newest release but failed; latest must skip it. Here 1.0 is
+    # also failed, so no release is ok and nothing is latest.
+    versions = build_counts(sample())["versions"]
+    assert all(not r["latest"] for r in versions)
+
+
+def test_latest_is_the_newest_ok_release_skipping_a_failed_newer_one():
+    targets = [
+        target("source-2.0", ref="2.0", status="failed", reason="x"),
+        target("source-1.0", ref="1.0"),
+    ]
+    records = {r["ref"]: r for r in build_counts(report(targets, []))["versions"]}
+    assert records["2.0"]["latest"] is False
+    assert records["1.0"]["latest"] is True
+
+
+def test_a_non_semver_tag_is_never_latest():
+    targets = [target("s0", ref="development"), target("s1", ref="nightly")]
+    doc = report(targets, [])
+    records = {r["ref"]: r for r in build_counts(doc)["versions"]}
+    assert records["nightly"]["kind"] == "release"
+    assert all(not r["latest"] for r in records.values())
+
+
+def test_an_ok_version_reports_the_expected_hardcoded_severity_split():
+    # two_versions(): 1.2.9 has one HIGH and one MEDIUM (one of them fixable),
+    # 1.1.15 one HIGH and one LOW. Pinning the split guards against a wrong but
+    # self-consistent formula that the derive-from-the-code check would miss.
+    records = {r["ref"]: r for r in build_counts(two_versions())["versions"]}
+    assert (records["1.2.9"]["h"], records["1.2.9"]["m"]) == (1, 1)
+    assert (records["1.1.15"]["h"], records["1.1.15"]["l"]) == (1, 1)
+
+
 def test_a_failed_version_has_zero_counts_and_failed_status():
     # sample(): 2.0 is not_applicable and 1.0 has a failed OSV scan - both failed,
     # both zeroed, as build_counts leaves a non-ok target

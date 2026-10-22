@@ -256,9 +256,21 @@ def build_counts(report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def is_release(ref: str, default_branch: str | None) -> bool:
+    """A real release: a plain semver tag, not the default branch and not a
+    pre-release. A ref that does not parse as semver is not a release, so a
+    non-semver tag never becomes the latest release.
+    """
+    if ref == default_branch or ref == "development":
+        return False
+    m = VERSION.fullmatch(ref)
+    return m is not None and m[2] is None
+
+
 def version_kind(ref: str, default_branch: str | None) -> str:
     """``development`` for the default branch or ``development``; ``candidate`` for a
-    semver with a pre-release part (``0.50.0-rc.1``); ``release`` otherwise.
+    semver with a pre-release part (``0.50.0-rc.1``); ``release`` otherwise (a plain
+    semver tag, or any other tag that is neither the branch nor a pre-release).
     """
     if ref == default_branch or ref == "development":
         return "development"
@@ -282,20 +294,22 @@ def version_counts(report: Mapping[str, Any]) -> list[dict[str, Any]]:
     it is the latest release, its scan status, and the severity counts of its unique
     vulnerabilities. A version with any non-ok target is ``failed`` with zero counts,
     as ``build_counts`` leaves a non-ok target.
+
+    ``latest`` marks the newest ``ok`` release so the notifier shows a live release as
+    a repo's headline, not a failed one; if every release failed (or there is none),
+    no record is ``latest`` and the notifier falls back to another version.
     """
+    default_branch = report["default_branch"]
     findings = report["findings"]
     source_ids = {t["id"] for t in report["targets"] if t["kind"] == "fs"}
     by_id = {t["id"]: t for t in report["targets"]}
-    by_version = versions_of(report)
-    kinds = {ref: version_kind(ref, report.get("default_branch")) for ref, _ in by_version}
-    latest = next((ref for ref, _ in by_version if kinds[ref] == "release"), None)
     records = []
-    for ref, ids in by_version:
+    for ref, ids in versions_of(report):
         failed = any(by_id[tid]["status"] != "ok" for tid in ids)
         record: dict[str, Any] = {
             "ref": ref,
-            "kind": kinds[ref],
-            "latest": ref == latest,
+            "kind": version_kind(ref, default_branch),
+            "latest": False,  # resolved below, once every status is known
             "status": "failed" if failed else "ok",
             **{key: 0 for key in SEVERITY_KEY.values()},
             "all": 0,
@@ -310,6 +324,10 @@ def version_counts(report: Mapping[str, Any]) -> list[dict[str, Any]]:
             record["all"] = block["all"]
             record["fixable"] = block["fixable"]
         records.append(record)
+    for record in records:
+        if record["status"] == "ok" and is_release(record["ref"], default_branch):
+            record["latest"] = True
+            break
     return records
 
 

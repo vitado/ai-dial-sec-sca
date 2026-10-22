@@ -252,7 +252,65 @@ def build_counts(report: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "total": severity_block(package_rows(findings, source_ids)),
         "targets": result,
+        "versions": version_counts(report),
     }
+
+
+def version_kind(ref: str, default_branch: str | None) -> str:
+    """``development`` for the default branch or ``development``; ``candidate`` for a
+    semver with a pre-release part (``0.50.0-rc.1``); ``release`` otherwise.
+    """
+    if ref == default_branch or ref == "development":
+        return "development"
+    m = VERSION.fullmatch(ref)
+    if m and m[2] is not None:
+        return "candidate"
+    return "release"
+
+
+SEVERITY_KEY = {
+    "CRITICAL": "c",
+    "HIGH": "h",
+    "MEDIUM": "m",
+    "LOW": "l",
+    "UNKNOWN": "unknown",
+}
+
+
+def version_counts(report: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """One flat record per version of ``versions_of``, in that order: its kind, whether
+    it is the latest release, its scan status, and the severity counts of its unique
+    vulnerabilities. A version with any non-ok target is ``failed`` with zero counts,
+    as ``build_counts`` leaves a non-ok target.
+    """
+    findings = report["findings"]
+    source_ids = {t["id"] for t in report["targets"] if t["kind"] == "fs"}
+    by_id = {t["id"]: t for t in report["targets"]}
+    by_version = versions_of(report)
+    kinds = {ref: version_kind(ref, report.get("default_branch")) for ref, _ in by_version}
+    latest = next((ref for ref, _ in by_version if kinds[ref] == "release"), None)
+    records = []
+    for ref, ids in by_version:
+        failed = any(by_id[tid]["status"] != "ok" for tid in ids)
+        record: dict[str, Any] = {
+            "ref": ref,
+            "kind": kinds[ref],
+            "latest": ref == latest,
+            "status": "failed" if failed else "ok",
+            **{key: 0 for key in SEVERITY_KEY.values()},
+            "all": 0,
+            "fixable": 0,
+        }
+        if not failed:
+            block = severity_block(
+                package_rows([f for f in findings if f["target"] in ids], source_ids)
+            )
+            for sev, key in SEVERITY_KEY.items():
+                record[key] = block["by_severity"][sev]["all"]
+            record["all"] = block["all"]
+            record["fixable"] = block["fixable"]
+        records.append(record)
+    return records
 
 
 def scan_status(trivy: Mapping[str, Any], osv: Mapping[str, Any] | None) -> str:

@@ -1,8 +1,8 @@
 """The counts block of report.json: severity and fixability, from the summary's rows."""
 
 from merge_results import SCHEMA_VERSION
-from summary import build_counts, package_rows
-from test_summary import finding, report, sample, target
+from summary import build_counts, package_rows, severity_block, versions_of
+from test_summary import finding, report, sample, target, two_versions
 
 SEVS = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
 
@@ -28,13 +28,31 @@ def test_schema_version_is_bumped():
     assert SCHEMA_VERSION == 3
 
 
+def version(ref, kind, status="ok", latest=False, c=0, h=0, m=0, l=0, unknown=0,
+            fixable=0):
+    """An expected ``counts.versions`` record: the flat severities given, rest zero."""
+    return {
+        "ref": ref, "kind": kind, "latest": latest, "status": status,
+        "c": c, "h": h, "m": m, "l": l, "unknown": unknown,
+        "all": c + h + m + l + unknown, "fixable": fixable,
+    }
+
+
 def test_empty_report_has_zero_counts():
     counts = build_counts(report([target("src")], []))
-    assert counts == {"total": shape(), "targets": {"src": shape(status="ok")}}
+    assert counts == {
+        "total": shape(),
+        "targets": {"src": shape(status="ok")},
+        "versions": [version("development", "development")],
+    }
 
 
 def test_no_targets_no_findings():
-    assert build_counts(report([], [])) == {"total": shape(), "targets": {}}
+    assert build_counts(report([], [])) == {
+        "total": shape(),
+        "targets": {},
+        "versions": [],
+    }
 
 
 def test_mixed_severities_and_fixability():
@@ -134,3 +152,87 @@ def test_findings_of_a_failed_target_do_not_leak_into_total_of_others():
     counts = build_counts(report(targets, findings))
     assert counts["total"]["all"] == 1
     assert counts["targets"]["img"] == {"status": "failed"}
+
+
+# --- counts.versions: one flat record per version, in versions_of order ---
+
+
+def test_versions_follow_versions_of_order_and_name():
+    rep = two_versions()
+    versions = build_counts(rep)["versions"]
+    assert [r["ref"] for r in versions] == [v for v, _ in versions_of(rep)]
+
+
+def test_an_ok_version_matches_its_severity_block_and_its_counts_sum_to_all():
+    rep = two_versions()
+    by_version = dict(versions_of(rep))
+    source_ids = {t["id"] for t in rep["targets"] if t["kind"] == "fs"}
+    for record in build_counts(rep)["versions"]:
+        if record["status"] != "ok":
+            continue
+        ids = by_version[record["ref"]]
+        block = severity_block(
+            package_rows([f for f in rep["findings"] if f["target"] in ids], source_ids)
+        )
+        by = block["by_severity"]
+        assert record["c"] == by["CRITICAL"]["all"]
+        assert record["h"] == by["HIGH"]["all"]
+        assert record["m"] == by["MEDIUM"]["all"]
+        assert record["l"] == by["LOW"]["all"]
+        assert record["unknown"] == by["UNKNOWN"]["all"]
+        assert record["all"] == block["all"] == record["c"] + record["h"] + record[
+            "m"
+        ] + record["l"] + record["unknown"]
+        assert record["fixable"] == block["fixable"]
+
+
+def test_kind_is_development_candidate_or_release():
+    refs = ["development", "0.50.0-rc.1", "1.2.0", "v2.0.0"]
+    doc = report([target(f"s{i}", ref=r) for i, r in enumerate(refs)], [])
+    kinds = {r["ref"]: r["kind"] for r in build_counts(doc)["versions"]}
+    assert kinds["development"] == "development"
+    assert kinds["0.50.0-rc.1"] == "candidate"
+    assert kinds["1.2.0"] == "release"
+    assert kinds["2.0.0"] == "release"
+
+
+def test_the_default_branch_is_development_kind_even_when_not_named_development():
+    doc = report([target("s", ref="main")], [])
+    doc["default_branch"] = "main"
+    (record,) = build_counts(doc)["versions"]
+    assert record["ref"] == "main" and record["kind"] == "development"
+
+
+def test_exactly_one_latest_the_newest_release_when_a_release_exists():
+    versions = build_counts(two_versions())["versions"]
+    latest = [r for r in versions if r["latest"]]
+    assert len(latest) == 1
+    assert latest[0]["ref"] == "1.2.9" and latest[0]["kind"] == "release"
+
+
+def test_no_latest_when_there_is_no_release():
+    doc = report(
+        [target("s0", ref="development"), target("s1", ref="0.1.0-rc.1")], []
+    )
+    versions = build_counts(doc)["versions"]
+    assert all(not r["latest"] for r in versions)
+
+
+def test_a_failed_version_has_zero_counts_and_failed_status():
+    # sample(): 2.0 is not_applicable and 1.0 has a failed OSV scan - both failed,
+    # both zeroed, as build_counts leaves a non-ok target
+    records = {r["ref"]: r for r in build_counts(sample())["versions"]}
+    for ref in ("2.0", "1.0"):
+        r = records[ref]
+        assert r["status"] == "failed"
+        assert (r["c"], r["h"], r["m"], r["l"], r["unknown"]) == (0, 0, 0, 0, 0)
+        assert r["all"] == 0 and r["fixable"] == 0
+
+
+def test_a_version_is_failed_when_any_of_its_targets_is_not_ok():
+    targets = [
+        target("source-1.0", ref="1.0"),
+        target("source-1.0", "osv", ref="1.0", status="failed", reason="x"),
+    ]
+    (record,) = build_counts(report(targets, []))["versions"]
+    assert record["ref"] == "1.0" and record["status"] == "failed"

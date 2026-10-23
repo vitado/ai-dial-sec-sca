@@ -28,13 +28,22 @@ def test_schema_version_is_bumped():
     assert SCHEMA_VERSION == 3
 
 
-def version(ref, kind, status="ok", latest=False, c=0, h=0, m=0, l=0, unknown=0,
-            fixable=0):
+def version(
+    ref, kind, status="ok", latest=False, c=0, h=0, m=0, l=0, unknown=0, fixable=0
+):
     """An expected ``counts.versions`` record: the flat severities given, rest zero."""
     return {
-        "ref": ref, "kind": kind, "latest": latest, "status": status,
-        "c": c, "h": h, "m": m, "l": l, "unknown": unknown,
-        "all": c + h + m + l + unknown, "fixable": fixable,
+        "ref": ref,
+        "kind": kind,
+        "latest": latest,
+        "status": status,
+        "c": c,
+        "h": h,
+        "m": m,
+        "l": l,
+        "unknown": unknown,
+        "all": c + h + m + l + unknown,
+        "fixable": fixable,
     }
 
 
@@ -180,9 +189,11 @@ def test_an_ok_version_matches_its_severity_block_and_its_counts_sum_to_all():
         assert record["m"] == by["MEDIUM"]["all"]
         assert record["l"] == by["LOW"]["all"]
         assert record["unknown"] == by["UNKNOWN"]["all"]
-        assert record["all"] == block["all"] == record["c"] + record["h"] + record[
-            "m"
-        ] + record["l"] + record["unknown"]
+        assert (
+            record["all"]
+            == block["all"]
+            == record["c"] + record["h"] + record["m"] + record["l"] + record["unknown"]
+        )
         assert record["fixable"] == block["fixable"]
 
 
@@ -211,9 +222,7 @@ def test_exactly_one_latest_the_newest_release_when_a_release_exists():
 
 
 def test_no_latest_when_there_is_no_release():
-    doc = report(
-        [target("s0", ref="development"), target("s1", ref="0.1.0-rc.1")], []
-    )
+    doc = report([target("s0", ref="development"), target("s1", ref="0.1.0-rc.1")], [])
     versions = build_counts(doc)["versions"]
     assert all(not r["latest"] for r in versions)
 

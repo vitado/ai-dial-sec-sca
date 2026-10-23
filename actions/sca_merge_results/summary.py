@@ -257,9 +257,8 @@ def build_counts(report: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def is_release(ref: str, default_branch: str | None) -> bool:
-    """A real release: a plain semver tag, not the default branch and not a
-    pre-release. A ref that does not parse as semver is not a release, so a
-    non-semver tag never becomes the latest release.
+    """A plain semver tag: not the default branch, not ``development``, not a
+    pre-release, and not a ref that does not parse as semver.
     """
     if ref == default_branch or ref == "development":
         return False
@@ -269,8 +268,7 @@ def is_release(ref: str, default_branch: str | None) -> bool:
 
 def version_kind(ref: str, default_branch: str | None) -> str:
     """``development`` for the default branch or ``development``; ``candidate`` for a
-    semver with a pre-release part (``0.50.0-rc.1``); ``release`` otherwise (a plain
-    semver tag, or any other tag that is neither the branch nor a pre-release).
+    semver with a pre-release part (``0.50.0-rc.1``); ``release`` otherwise.
     """
     if ref == default_branch or ref == "development":
         return "development"
@@ -290,14 +288,10 @@ SEVERITY_KEY = {
 
 
 def version_counts(report: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """One flat record per version of ``versions_of``, in that order: its kind, whether
-    it is the latest release, its scan status, and the severity counts of its unique
-    vulnerabilities. A version with any non-ok target is ``failed`` with zero counts,
-    as ``build_counts`` leaves a non-ok target.
-
-    ``latest`` marks the newest ``ok`` release so the notifier shows a live release as
-    a repo's headline, not a failed one; if every release failed (or there is none),
-    no record is ``latest`` and the notifier falls back to another version.
+    """One flat record per version of ``versions_of``, in that order: kind, whether it
+    is the latest release, scan status, and the severity counts of its unique
+    vulnerabilities. A version with any non-ok target is ``failed`` with zero counts.
+    ``latest`` marks the newest ``ok`` release, or no record if there is none.
     """
     default_branch = report["default_branch"]
     findings = report["findings"]

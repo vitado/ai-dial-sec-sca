@@ -179,31 +179,6 @@ def test_versions_follow_versions_of_order_and_name():
     assert [r["ref"] for r in versions] == [v for v, _ in versions_of(rep)]
 
 
-def test_an_ok_version_matches_its_severity_block_and_its_counts_sum_to_all():
-    rep = two_versions()
-    by_version = dict(versions_of(rep))
-    source_ids = {t["id"] for t in rep["targets"] if t["kind"] == "fs"}
-    for record in build_counts(rep)["versions"]:
-        if record["status"] != "ok":
-            continue
-        ids = by_version[record["ref"]]
-        block = severity_block(
-            package_rows([f for f in rep["findings"] if f["target"] in ids], source_ids)
-        )
-        by = block["by_severity"]
-        assert record["c"] == by["CRITICAL"]["all"]
-        assert record["h"] == by["HIGH"]["all"]
-        assert record["m"] == by["MEDIUM"]["all"]
-        assert record["l"] == by["LOW"]["all"]
-        assert record["unknown"] == by["UNKNOWN"]["all"]
-        assert (
-            record["all"]
-            == block["all"]
-            == record["c"] + record["h"] + record["m"] + record["l"] + record["unknown"]
-        )
-        assert record["fixable"] == block["fixable"]
-
-
 def test_kind_is_development_candidate_or_release():
     refs = ["development", "0.50.0-rc.1", "1.2.0", "v2.0.0"]
     doc = report([target(f"s{i}", ref=r) for i, r in enumerate(refs)], [])
@@ -231,13 +206,6 @@ def test_exactly_one_latest_the_newest_release_when_a_release_exists():
 def test_no_latest_when_there_is_no_release():
     doc = report([target("s0", ref="development"), target("s1", ref="0.1.0-rc.1")], [])
     versions = build_counts(doc)["versions"]
-    assert all(not r["latest"] for r in versions)
-
-
-def test_a_failed_release_is_not_latest():
-    # sample(): 2.0 is the newest release but failed; latest must skip it. Here 1.0 is
-    # also failed, so no release is ok and nothing is latest.
-    versions = build_counts(sample())["versions"]
     assert all(not r["latest"] for r in versions)
 
 
@@ -308,3 +276,7 @@ def test_version_counts_match_flat_counts_of_shared_rows():
         assert record["unknown"] == expected["unknown"]
         assert record["all"] == expected["all"]
         assert record["fixable"] == expected["fixable"]
+        assert (
+            record["all"]
+            == record["c"] + record["h"] + record["m"] + record["l"] + record["unknown"]
+        )

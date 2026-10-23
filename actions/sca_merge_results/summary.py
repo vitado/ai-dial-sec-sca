@@ -254,9 +254,22 @@ def build_counts(report: Mapping[str, Any], rows: Rows | None = None) -> dict[st
             result[tid] = {"status": "ok", **severity_block(t_rows)}
         else:
             result[tid] = {"status": t["status"]}
+    return {
+        "total": severity_block(rows.all_rows),
+        "targets": result,
+        "versions": version_counts(report, rows),
+    }
+
+
+def version_counts(report: Mapping[str, Any], rows: Rows) -> list[dict[str, Any]]:
+    """One flat record per version of ``rows.by_version``, in that order: kind, whether
+    it is the latest release, scan status, and the severity counts of its unique
+    vulnerabilities. A version with any non-ok target is ``failed`` with zero counts.
+    ``latest`` marks the newest ``ok`` release, or no record if there is none.
+    """
     default_branch = report["default_branch"]
     by_id = {t["id"]: t for t in report["targets"]}
-    versions = []
+    records = []
     for ref, ids in rows.by_version:
         failed = any(by_id[tid]["status"] != "ok" for tid in ids)
         record: dict[str, Any] = {
@@ -274,16 +287,12 @@ def build_counts(report: Mapping[str, Any], rows: Rows | None = None) -> dict[st
         }
         if not failed:
             record.update(flat_counts(severity_block(rows.version_rows[ref])))
-        versions.append(record)
-    for record in versions:
+        records.append(record)
+    for record in records:
         if record["status"] == "ok" and is_release(record["ref"], default_branch):
             record["latest"] = True
             break
-    return {
-        "total": severity_block(rows.all_rows),
-        "targets": result,
-        "versions": versions,
-    }
+    return records
 
 
 def is_release(ref: str, default_branch: str | None) -> bool:

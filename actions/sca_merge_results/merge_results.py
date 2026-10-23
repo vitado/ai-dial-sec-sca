@@ -42,7 +42,7 @@ from normalize import (
     normalize_osv,
     normalize_trivy,
 )
-from summary import build_counts, build_summary, truncate_summary
+from summary import build_counts, build_rows, build_summary, truncate_summary
 
 SCHEMA_VERSION = 3
 
@@ -222,9 +222,10 @@ def run_merge(
         "targets": entries,
         "findings": list(findings.values()),
     }
-    report["counts"] = build_counts(report)
+    rows = build_rows(report)
+    report["counts"] = build_counts(report, rows)
     dump_json(output_dir / "report.json", report)
-    summary = build_summary(report)
+    summary = build_summary(report, rows)
     (output_dir / "summary.md").write_text(summary, encoding="utf-8", newline="\n")
     return report, summary
 

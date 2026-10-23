@@ -1,7 +1,14 @@
 """The counts block of report.json: severity and fixability, from the summary's rows."""
 
 from merge_results import SCHEMA_VERSION
-from summary import build_counts, package_rows, severity_block, versions_of
+from summary import (
+    build_counts,
+    build_rows,
+    flat_counts,
+    package_rows,
+    severity_block,
+    versions_of,
+)
 from test_summary import finding, report, sample, target, two_versions
 
 SEVS = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
@@ -279,3 +286,25 @@ def test_a_version_is_failed_when_any_of_its_targets_is_not_ok():
     ]
     (record,) = build_counts(report(targets, []))["versions"]
     assert record["ref"] == "1.0" and record["status"] == "failed"
+
+
+def test_version_counts_match_flat_counts_of_shared_rows():
+    # two_versions(): 1.2.9 has source + 2 images; sanitize (MEDIUM, fixable) is in
+    # all three. Verifies that counts.versions[ref] equals flat_counts derived from
+    # the shared rows context - i.e. no double-counting across the two axes.
+    rep = two_versions()
+    rows = build_rows(rep)
+    counts = build_counts(rep, rows)
+    records = {r["ref"]: r for r in counts["versions"]}
+    for ref, vrows in rows.version_rows.items():
+        record = records[ref]
+        if record["status"] != "ok":
+            continue
+        expected = flat_counts(severity_block(vrows))
+        assert record["c"] == expected["c"]
+        assert record["h"] == expected["h"]
+        assert record["m"] == expected["m"]
+        assert record["l"] == expected["l"]
+        assert record["unknown"] == expected["unknown"]
+        assert record["all"] == expected["all"]
+        assert record["fixable"] == expected["fixable"]
